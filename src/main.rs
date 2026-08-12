@@ -60,14 +60,10 @@ impl CiphertextWriter {
         let cipher = Aes128Ctr::new_from_slices(&key, &iv)
             .expect("Unable to initialize cipher");
 
-        // RRAM offset must be aligned to 32 bytes (minium update granularity) and also to the key
-        // size.
-        const RRAM_GRANULARITY: usize = 16;
-        assert!(Self::KEY_BYTES <= RRAM_GRANULARITY);
-        assert!(RRAM_GRANULARITY % Self::KEY_BYTES == 0);
+        // If the RRAM data is not aligned to the shifter block size, fix it.
         let mut rram_offset = expected_rram_data.len();
-        if rram_offset % RRAM_GRANULARITY != 0 {
-            rram_offset += RRAM_GRANULARITY - rram_offset % RRAM_GRANULARITY;
+        if rram_offset % Self::KEY_BYTES != 0 {
+            rram_offset += Self::KEY_BYTES - rram_offset % Self::KEY_BYTES;
         }
 
         // Accumulate rram data into shifter.
