@@ -23,6 +23,7 @@ struct CiphertextWriter {
     cipher: Aes128Ctr,
     serial: Box<dyn SerialPort>,
     shifter: ShiftXor<16>,
+    rram_data_end: usize,
     rram_offset: usize,
 }
 
@@ -59,18 +60,29 @@ impl CiphertextWriter {
         let cipher = Aes128Ctr::new_from_slices(&key, &iv)
             .expect("Unable to initialize cipher");
 
-        // Accumulate rram data into shifter.
-        let (chunks, rem) = expected_rram_data.as_chunks::<{ Self::KEY_BYTES }>();
-        for c in chunks {
-            shifter.absorb(c);
+        // RRAM offset must be aligned to 32 bytes (minium update granularity) and also to the key
+        // size.
+        const RRAM_GRANULARITY: usize = 32;
+        assert!(Self::KEY_BYTES <= RRAM_GRANULARITY);
+        assert!(RRAM_GRANULARITY % Self::KEY_BYTES == 0);
+        let mut rram_offset = expected_rram_data.len();
+        if rram_offset % RRAM_GRANULARITY != 0 {
+            rram_offset += RRAM_GRANULARITY - rram_offset % RRAM_GRANULARITY;
         }
 
-        let mut rram_offset = expected_rram_data.len();
-        if rem.len() > 0 {
-            rram_offset += Self::KEY_BYTES;
-            let mut final_chunk = [0u8; Self::KEY_BYTES];
-            final_chunk[..rem.len()].copy_from_slice(rem);
-            shifter.absorb(&final_chunk);
+        // TODO
+        // - need to accumulate chunks + padding block
+        // - need to get MORE zeroes up to RRAM OFFSET
+        // - may not need to actually? just padding block?
+
+        // Accumulate rram data into shifter.
+        let end = expected_rram_data.len();
+        let aligned_end = end - end % Self::KEY_BYTES;
+        shifter.absorb(&expected_rram_data[..aligned_end]);
+        if aligned_end < rram_offset {
+            let mut data = vec![0u8;rram_offset - aligned_end];
+            data[..end - aligned_end].copy_from_slice(&expected_rram_data[aligned_end..]);
+            shifter.absorb(&data);
         }
 
         CiphertextWriter {
@@ -78,6 +90,7 @@ impl CiphertextWriter {
             bytes_written: 0,
             cipher: cipher,
             serial: serial,
+            rram_data_end: end,
             rram_offset: rram_offset,
             shifter: shifter,
         }
@@ -105,7 +118,7 @@ impl CiphertextWriter {
     fn read_u32(&mut self) -> u32 {
         let mut reply = [0u8;4];
         let result = self.serial.read_exact(&mut reply);
-        self.unwrap_serial(result, "reading length");
+        self.unwrap_serial(result, "reading u32 value");
         u32::from_le_bytes(reply)
     }
 
@@ -131,10 +144,18 @@ impl CiphertextWriter {
         self.serial.write(&stride.to_le_bytes())
             .expect("Could not send stride length.");
         println!("<< {}", format!("{}", stride).yellow());
-        let offset = self.rram_offset as u32;
+        let offset = self.rram_data_end as u32;
         self.serial.write(&offset.to_le_bytes())
             .expect("Could not send offset.");
         println!("<< {}", format!("{}", offset).yellow());
+
+        println!("Reading error code...");
+        let err = self.read_u32();
+        println!(">> {}", format!("{}", err).blue());
+        if err != 0 {
+            println!("{}", format!("Nonzero error code from device: {}", err).red());
+            process::exit(1);
+        }
 
         println!("Reading memory length...");
         let len = self.read_u32();
@@ -246,7 +267,7 @@ impl CiphertextWriter {
         if reply == self.key {
             println!("{}", format!("Key recovery successful in {}ms.", elapsed.as_millis()).green());
             println!("{}", format!("{:?} bytes of memory proven erased.", self.bytes_written).green());
-            println!("{}", format!("{:?} bytes of memory given a lightweight check.", self.rram_offset).yellow());
+            println!("{}", format!("{:?} bytes of memory given a lightweight check.", self.rram_data_end).yellow());
         } else {
             println!("{}", "Key recovery failed!".red());
             println!("Host:   {}", hex::encode(self.key));
