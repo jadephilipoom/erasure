@@ -290,7 +290,7 @@ fn main() {
     println!("Encrypting file {} and sending on port {}", file_name, port_name);
 
     let port = serialport::new(port_name, 1_000_000)
-        .timeout(time::Duration::from_millis(1000))
+        .timeout(time::Duration::from_millis(1))
         .open()
         .expect("Failed to open port");
 
