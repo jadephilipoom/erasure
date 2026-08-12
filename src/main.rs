@@ -144,11 +144,16 @@ impl CiphertextWriter {
         let cipher = Aes128Ctr::new_from_slices(&key, &iv)
             .expect("Unable to initialize cipher");
 
-        CiphertextWriter {
+        let mut writer = CiphertextWriter {
             cipher: cipher,
             serial: serial,
             shifter: shifter,
-        }
+        };
+
+        // Send a restart command in case we already did an erasure since last boot.
+        writer.send_cmd("erase restart");
+
+        writer
     }
 
     fn read_and_print_all(&mut self) -> Result<String, io::Error> {
@@ -244,7 +249,6 @@ impl CiphertextWriter {
     }
 
     fn encrypt_and_send(&mut self, plaintext: &[u8]) {
-        self.send_cmd("erase restart");
         let target_bytelen: usize = self.get_target_len();
 
         // We generally expect the plaintext to be much shorter than the target length; panic if
@@ -305,6 +309,7 @@ fn main() {
         .expect("Could not open file");
 
     let mut writer = CiphertextWriter::new(port);
+    writer.send_key_block();
     writer.encrypt_and_send(&plaintext);
     writer.send_key_block();
     println!("length: {:?}", writer.get_target_len());
