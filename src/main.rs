@@ -4,9 +4,11 @@ use serialport::SerialPort;
 use sha2::Sha256;
 use sha2::Digest;
 use std::env;
-use std::io::{Error, Write};
+use std::io;
+use std::io::Write;
 use std::fs;
 use std::process;
+use std::thread;
 use std::time;
 
 /// Iteratively performs ShiftXOR function as described in the SUANT paper.
@@ -104,13 +106,12 @@ struct CiphertextWriter {
     shifter: ShiftXor<16>
 }
 
-impl Write for CiphertextWriter {
-    fn write(&mut self, buf: &[u8]) -> Result<usize, Error> {
-        print!("{}", str::from_utf8(buf).unwrap());
+impl io::Write for CiphertextWriter {
+    fn write(&mut self, buf: &[u8]) -> Result<usize, io::Error> {
         self.serial.write(buf)
     }
 
-    fn flush(&mut self) -> Result<(), Error> {
+    fn flush(&mut self) -> Result<(), io::Error> {
         self.serial.flush()
     }
 }
@@ -149,36 +150,79 @@ impl CiphertextWriter {
         }
     }
 
-    fn read_and_print_all(&mut self) {
-        println!("to read: {:?}", self.serial.bytes_to_read());
+    fn read_and_print_all(&mut self) -> Result<String, io::Error> {
         let mut msg = String::new();
-        /*
         while self.serial.bytes_to_read().unwrap() != 0 {
             // The length of this buffer sets the max read size. I didn't find much guidance on a
             // good setting here so the choice is pretty much arbitrary.
             let mut buf = [0u8;1024];
-            let nbytes = self.serial.read(&mut buf)
-                .expect("Could not read from serial");
+            let nbytes = self.serial.read(&mut buf)?;
             msg.push_str(str::from_utf8(&buf[..nbytes])
                 .expect("Could not decode serial read as UTF-8"));
         }
-        */
-        self.serial.read_to_string(&mut msg)
-            .ok();
-            // .expect("Could not read from serial");
         for line in msg.lines() {
             println!(">> {}", line);
         }
+        Ok(msg)
+    }
+
+    fn expect_response(&mut self, expected: &str) -> Result<(), io::Error> {
+        let mut buf = vec![0u8; expected.len()];
+        self.serial.read_exact(&mut buf)?;
+        let actual = str::from_utf8(&buf)
+            .expect("Could not decode serial read as UTF-8");
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(io::Error::new(io::ErrorKind::Other, format!("Unexpected response over serial: expected {}, got {}", expected, actual)))
+        }
+    }
+
+    fn try_send_cmd(&mut self, cmd: &str) -> Result<String, io::Error> {
+        write!(self, "{}\n\r", cmd)?;
+
+        // Wait for the device and then read the output.
+        thread::sleep(self.serial.timeout());
+
+        // Expect the command itself to get echoed back immediately.
+        self.expect_response(format!("{}\n\r\n\r", cmd).as_str());
+
+        // Read and return any remaining output.
+        self.read_and_print_all()
+    }
+
+    fn send_cmd(&mut self, cmd: &str) -> String {
+        println!("<< {}", cmd);
+
+        // This choice of retries was arbitrary and may be tuned.
+        let max_attempts = 2;
+
+        for i in 0..max_attempts {
+            match self.try_send_cmd(cmd) {
+                Ok(result) => {
+                    return result;
+                }
+                e => {
+                    println!("send_cmd attempt {:?}/{:?}: {:?}", i+1, max_attempts, e)
+                }
+            }
+        }
+        panic!("Command unsuccessful: {}", cmd)
     }
 
     fn get_target_len(&mut self) -> usize {
-        // Read to clear the buffer.
-        self.read_and_print_all();
-        write!(self, "erase len\n\r")
-            .expect("Could not write to serial");
-        // Read output.
-        self.read_and_print_all();
-        1024
+        match self.serial.bytes_to_read() {
+            Ok(0) => (),
+            Ok(_) => {
+                // Print to clear the buffer.
+                self.read_and_print_all().expect("Read error");
+            }
+            e => {
+                panic!("Serial port read error: {:?}", e)
+            }
+        }
+        self.send_cmd("erase len");
+        128
     }
 
     /// Encrypt a chunk of data and send it to the serial interface. The plaintext slice must be
@@ -187,11 +231,12 @@ impl CiphertextWriter {
         let mut ciphertext = [0u8;Self::STREAM_WRITE_BYTES];
         self.cipher.apply_keystream_b2b(plaintext, &mut ciphertext);
         self.shifter.absorb(&ciphertext);
-        write!(self, "erase write {}\n\r", hex::encode(ciphertext))
-            .expect("Could not write to serial");
+        self.send_cmd(format!("erase write {}", hex::encode(ciphertext))
+            .as_str());
     }
 
     fn encrypt_and_send(&mut self, plaintext: &[u8]) {
+        self.send_cmd("erase restart");
         let target_bytelen: usize = self.get_target_len();
 
         // We generally expect the plaintext to be much shorter than the target length; panic if
@@ -228,8 +273,7 @@ impl CiphertextWriter {
         // Send the seed and the key block across the serial interface.
         let seed = hex::encode(self.shifter.seed());
         let key_block = hex::encode(self.shifter.key());
-        write!(self, "erase key {} {}\n\r", seed, key_block)
-            .expect("Could not write key block to serial");
+        self.send_cmd(format!("erase key {} {}", seed, key_block).as_str());
     }
 }
 
@@ -245,7 +289,7 @@ fn main() {
     println!("Encrypting file {} and sending on port {}", file_name, port_name);
 
     let port = serialport::new(port_name, 1_000_000)
-        .timeout(time::Duration::from_millis(10000))
+        .timeout(time::Duration::from_millis(1000))
         .open()
         .expect("Failed to open port");
 
