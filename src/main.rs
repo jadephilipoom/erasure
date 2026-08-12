@@ -1,6 +1,6 @@
 use colored::Colorize;
 use ctr::cipher::{KeyIvInit, StreamCipher};
-use rand::Rng;
+use getrandom;
 use serialport::SerialPort;
 use std::env;
 use std::fs;
@@ -37,15 +37,14 @@ impl CiphertextWriter {
 
     fn new(serial: Box<dyn SerialPort>, expected_rram_data: Vec<u8>) -> Self {
         // Generate a random key (under the hood, accesses OS randomness).
-        // TODO: use getrandom instead
         // TODO: 256-bit keys?
         let mut key = [0u8; Self::KEY_BYTES];
-        rand::rng().fill_bytes(&mut key);
+        getrandom::fill(&mut key);
         println!("k: {}", hex::encode(key));
 
         // Initialize the shifter.
         let mut seed = [8u8; Self::KEY_BYTES];
-        rand::rng().fill_bytes(&mut seed);
+        getrandom::fill(&mut seed);
         println!("s: {}", hex::encode(seed));
         let mut shifter = ShiftXor::<{ Self::KEY_BYTES }>::new(&seed, &key);
 
