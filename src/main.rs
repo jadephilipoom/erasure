@@ -54,6 +54,9 @@ impl CiphertextWriter {
         println!("s: {}", hex::encode(seed));
         let shifter = ShiftXor::<16>::new(&seed, &key);
 
+        // Flush any lingering data in the serial connection.
+        serial.clear(serialport::ClearBuffer::All);
+
         // Set up the cipher.
         // WARNING: a constant all-zero IV is not safe in general! But since our key is random and we
         // only use it once, there is no chance of the same key+iv pair repeating even with a constant
@@ -79,10 +82,11 @@ impl CiphertextWriter {
     fn read_and_print_all(&mut self) -> Result<String, io::Error> {
         let mut msg = String::new();
         while self.serial.bytes_to_read().unwrap() != 0 {
+            println!("{:?}", self.serial.bytes_to_read());
             // The length of this buffer sets the max read size. I didn't find much guidance on a
             // good setting here so the choice is pretty much arbitrary.
-            let mut buf = [0u8;1024];
-            let nbytes = self.serial.read(&mut buf)?;
+            let mut buf = [0u8;256];
+            let nbytes = self.serial.read(&mut buf).unwrap();
             msg.push_str(str::from_utf8(&buf[..nbytes])
                 .expect("Could not decode serial read as UTF-8"));
         }
@@ -104,43 +108,43 @@ impl CiphertextWriter {
         }
     }
 
-    /// Sends a command, sleeps for the specified duration, and then reads the response.
-    fn try_send_cmd(&mut self, cmd: &str, sleep: time::Duration) -> Result<String, io::Error> {
+    /// Sends a command and then reads the response. Expects all output to be printed at once; if
+    /// there are delays between output printouts then this command might not capture all output.
+    fn try_send_cmd(&mut self, cmd: &str, timeout: time::Duration) -> Result<String, io::Error> {
+        println!("<< {}", cmd.yellow());
+
         write!(self, "{}\n\r", cmd)?;
 
-        // TODO: maybe actually poll this more properly instead of sleeping?
-        // Give the device some time to process before reading the output.
-        thread::sleep(sleep);
-
-        // Expect the command itself to get echoed back immediately.
+        // First, expect the command itself to get echoed back. This should always happen.
+        let mut start = time::Instant::now();
+        while self.serial.bytes_to_read().unwrap() == 0 {
+            if start.elapsed() > timeout {
+                return Err(io::Error::new(io::ErrorKind::TimedOut, format!("Timed out after {:?}ms waiting for command echo", timeout.as_millis())))
+            }
+        }
+        println!("{} milliseconds elapsed until output, {} bytes to read", start.elapsed().as_millis(), self.serial.bytes_to_read()?);
         self.expect_response(cmd)?;
         self.expect_response("\n\r\n")?;
 
+        // Wait a bit for further output data.
+        start = time::Instant::now();
+        while self.serial.bytes_to_read().unwrap() == 0 {
+            if start.elapsed() > timeout {
+                // No output doesn't necessarily mean an error here; some commands just don't
+                // produce output.
+                break;
+            }
+        }
+        println!("{} milliseconds elapsed until output, {} bytes to read", start.elapsed().as_millis(), self.serial.bytes_to_read().unwrap());
+
         // Read and return any remaining output.
+        thread::sleep(time::Duration::from_millis(1));
         self.read_and_print_all()
     }
 
-    fn send_cmd_custom_sleep(&mut self, cmd: &str, sleep: time::Duration) -> String {
-        println!("<< {}", cmd.yellow());
-
-        // This choice of retries was arbitrary and may be tuned.
-        let max_attempts = 2;
-
-        for i in 0..max_attempts {
-            match self.try_send_cmd(cmd, sleep) {
-                Ok(result) => {
-                    return result;
-                }
-                e => {
-                    println!("send_cmd attempt {:?}/{:?}: {:?}", i+1, max_attempts, e)
-                }
-            }
-        }
-        panic!("Command unsuccessful: {}", cmd)
-    }
-
     fn send_cmd(&mut self, cmd: &str) -> String {
-        self.send_cmd_custom_sleep(cmd, self.serial.timeout())
+        // By default, use the serial connection timeout. Panic on error.
+        self.try_send_cmd(cmd, self.serial.timeout()).unwrap()
     }
 
     fn get_target_len(&mut self) -> usize {
@@ -212,9 +216,9 @@ impl CiphertextWriter {
         // Send the seed and the key block across the serial interface.
         let seed = hex::encode(self.shifter.seed());
         let key_block = hex::encode(self.shifter.key());
-        let reply = self.send_cmd_custom_sleep(
+        let reply = self.try_send_cmd(
             format!("erase key {} {}", seed, key_block).as_str(),
-            time::Duration::from_millis(10_000));
+            time::Duration::from_millis(10_000)).unwrap();
         let expected = format!("key = {:02x?}\r\n", self.key);
         if expected == reply {
             println!("{}", "Key recovery successful.".green());
@@ -237,7 +241,7 @@ fn main() {
     println!("Encrypting file {} and sending on port {}", file_name, port_name);
 
     let port = serialport::new(port_name, 1_000_000)
-        .timeout(time::Duration::from_millis(10))
+        .timeout(time::Duration::from_millis(100))
         .open()
         .expect("Failed to open port");
 
