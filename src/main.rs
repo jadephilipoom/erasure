@@ -18,6 +18,8 @@ use crate::shiftxor::ShiftXor;
 type Aes128Ctr = ctr::Ctr32LE<aes::Aes128>;
 
 struct CiphertextWriter {
+    key: [u8;16],
+    bytes_written: usize,
     cipher: Aes128Ctr,
     serial: Box<dyn SerialPort>,
     shifter: ShiftXor<16>
@@ -36,7 +38,7 @@ impl io::Write for CiphertextWriter {
 impl CiphertextWriter {
     /// Size of the blocks of ciphertext we will stream across the serial interface. Should be a
     /// multiple of the ShiftXor block size.
-    const STREAM_WRITE_BYTES: usize = 32;
+    const STREAM_WRITE_BYTES: usize = 1024;
 
     fn new(serial: Box<dyn SerialPort>) -> Self {
         // Generate a random key (under the hood, accesses OS randomness).
@@ -61,6 +63,8 @@ impl CiphertextWriter {
             .expect("Unable to initialize cipher");
 
         let mut writer = CiphertextWriter {
+            key: key,
+            bytes_written: 0,
             cipher: cipher,
             serial: serial,
             shifter: shifter,
@@ -100,11 +104,13 @@ impl CiphertextWriter {
         }
     }
 
-    fn try_send_cmd(&mut self, cmd: &str) -> Result<String, io::Error> {
+    /// Sends a command, sleeps for the specified duration, and then reads the response.
+    fn try_send_cmd(&mut self, cmd: &str, sleep: time::Duration) -> Result<String, io::Error> {
         write!(self, "{}\n\r", cmd)?;
 
-        // Wait for the device and then read the output.
-        thread::sleep(self.serial.timeout());
+        // TODO: maybe actually poll this more properly instead of sleeping?
+        // Give the device some time to process before reading the output.
+        thread::sleep(sleep);
 
         // Expect the command itself to get echoed back immediately.
         self.expect_response(cmd)?;
@@ -114,14 +120,14 @@ impl CiphertextWriter {
         self.read_and_print_all()
     }
 
-    fn send_cmd(&mut self, cmd: &str) -> String {
+    fn send_cmd_custom_sleep(&mut self, cmd: &str, sleep: time::Duration) -> String {
         println!("<< {}", cmd.yellow());
 
         // This choice of retries was arbitrary and may be tuned.
         let max_attempts = 2;
 
         for i in 0..max_attempts {
-            match self.try_send_cmd(cmd) {
+            match self.try_send_cmd(cmd, sleep) {
                 Ok(result) => {
                     return result;
                 }
@@ -131,6 +137,10 @@ impl CiphertextWriter {
             }
         }
         panic!("Command unsuccessful: {}", cmd)
+    }
+
+    fn send_cmd(&mut self, cmd: &str) -> String {
+        self.send_cmd_custom_sleep(cmd, self.serial.timeout())
     }
 
     fn get_target_len(&mut self) -> usize {
@@ -162,6 +172,7 @@ impl CiphertextWriter {
         self.shifter.absorb(&ciphertext);
         self.send_cmd(format!("erase write {}", hex::encode(ciphertext))
             .as_str());
+        self.bytes_written += ciphertext.len();
     }
 
     fn encrypt_and_send(&mut self, plaintext: &[u8]) {
@@ -197,11 +208,20 @@ impl CiphertextWriter {
         }
     }
 
-    fn send_key_block(&mut self) {
+    fn check_key_recovery(&mut self) {
         // Send the seed and the key block across the serial interface.
         let seed = hex::encode(self.shifter.seed());
         let key_block = hex::encode(self.shifter.key());
-        self.send_cmd(format!("erase key {} {}", seed, key_block).as_str());
+        let reply = self.send_cmd_custom_sleep(
+            format!("erase key {} {}", seed, key_block).as_str(),
+            time::Duration::from_millis(10_000));
+        let expected = format!("key = {:02x?}\r\n", self.key);
+        if expected == reply {
+            println!("{}", "Key recovery successful.".green());
+            println!("{}", format!("{:?} bytes of memory proven erased.", self.bytes_written).green());
+        } else {
+            panic!("Key recovery failed!\nHost:   {}\nTarget: {}", expected, reply);
+        }
     }
 }
 
@@ -217,7 +237,7 @@ fn main() {
     println!("Encrypting file {} and sending on port {}", file_name, port_name);
 
     let port = serialport::new(port_name, 1_000_000)
-        .timeout(time::Duration::from_millis(5))
+        .timeout(time::Duration::from_millis(10))
         .open()
         .expect("Failed to open port");
 
@@ -226,6 +246,6 @@ fn main() {
 
     let mut writer = CiphertextWriter::new(port);
     writer.encrypt_and_send(&plaintext);
-    writer.send_key_block();
+    writer.check_key_recovery();
 }
 
