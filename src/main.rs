@@ -28,7 +28,7 @@ struct CiphertextWriter {
 impl CiphertextWriter {
     /// Size of the blocks of ciphertext we will stream across the serial interface. Should be a
     /// multiple of the ShiftXor block size.
-    const STREAM_WRITE_BYTES: usize = 1024;
+    const STREAM_WRITE_BYTES: usize = 4096;
 
     /// Determines the ShiftXor block size.
     const KEY_BYTES: usize = 16;
@@ -110,17 +110,19 @@ impl CiphertextWriter {
 
     fn get_target_len(&mut self) -> usize {
         // Send stride length to initiate handshake.
+        println!("Sending stride length...");
         let stride = Self::STREAM_WRITE_BYTES as u32;
         self.serial.write(&stride.to_le_bytes())
             .expect("Could not send stride length.");
         println!("<< {}", format!("{}", stride).yellow());
 
+        println!("Reading memory length...");
         let len = self.read_u32();
         println!(">> {}", format!("{}", len).blue());
         len as usize
     }
 
-    /// Do a single stream write..
+    /// Do a single stream write.
     fn write_ciphertext_block(&mut self, data: &[u8;Self::STREAM_WRITE_BYTES]) {
         self.shifter.absorb(data);
         let result = self.serial.write_all(data);
@@ -187,16 +189,9 @@ impl CiphertextWriter {
 
     fn check_key_recovery(&mut self) {
         // Send the seed and the key block across the serial interface.
-        let seed_len = self.read_u32();
-        println!(">> {}", format!("{}", seed_len).blue());
-        self.read_and_print_all().unwrap();
-        println!("Sending seed...");
         let seed = self.shifter.seed();
         let result = self.serial.write_all(seed);
         self.unwrap_serial(result, "writing seed");
-        let key_len = self.read_u32();
-        println!(">> {}", format!("{}", key_len).blue());
-        println!("Sending key...");
         let key_block = self.shifter.key();
         let result = self.serial.write_all(key_block);
         self.unwrap_serial(result, "writing key_block");
