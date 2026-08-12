@@ -70,19 +70,17 @@ impl CiphertextWriter {
             rram_offset += RRAM_GRANULARITY - rram_offset % RRAM_GRANULARITY;
         }
 
-        // TODO
-        // - need to accumulate chunks + padding block
-        // - need to get MORE zeroes up to RRAM OFFSET
-        // - may not need to actually? just padding block?
-
         // Accumulate rram data into shifter.
         let end = expected_rram_data.len();
         let aligned_end = end - end % Self::KEY_BYTES;
+        dbg!(end);
+        dbg!(aligned_end);
         shifter.absorb(&expected_rram_data[..aligned_end]);
         if aligned_end < rram_offset {
             let mut data = vec![0u8;rram_offset - aligned_end];
             data[..end - aligned_end].copy_from_slice(&expected_rram_data[aligned_end..]);
             shifter.absorb(&data);
+            dbg!(data.len());
         }
 
         CiphertextWriter {
@@ -160,10 +158,10 @@ impl CiphertextWriter {
         println!("Reading memory length...");
         let len = self.read_u32();
         println!(">> {}", format!("{}", len).blue());
-        let start = self.read_u32();
-        println!(">> {}", format!("{:x}", start).blue());
-        let end = self.read_u32();
-        println!(">> {}", format!("{:x}", end).blue());
+        for _ in 0..19 {
+            let x = self.read_u32();
+            println!(">> {}", format!("{:x}", x).blue());
+        }
         len as usize
     }
 
@@ -241,9 +239,8 @@ impl CiphertextWriter {
             self.bytes_written += data.len();
         }
 
+        progress.update(self.bytes_written);
         progress.done();
-
-        dbg!(self.bytes_written);
     }
 
     fn check_key_recovery(&mut self) {
@@ -254,7 +251,17 @@ impl CiphertextWriter {
         let key_block = self.shifter.key();
         let result = self.serial.write_all(key_block);
         self.unwrap_serial(result, "writing key_block");
-        self.read_and_print_all().unwrap();
+
+        // TODO: remove
+        let x = self.read_u32();
+        println!(">> {}", format!("{}", x).blue());
+        dbg!(self.shifter.counter);
+        let x = self.read_u32();
+        println!(">> {}", format!("{}", x).blue());
+        let x = self.read_u32();
+        println!(">> {}", format!("{}", x).blue());
+        let x = self.read_u32();
+        println!(">> {}", format!("{:x}", x).blue());
 
         // Set a generous timeout for this command.
         let old_timeout = self.serial.timeout();
@@ -377,7 +384,6 @@ fn main() {
             .expect("Could not interpret file as ELF")
     };
     bin.pretty_print_sections();
-    println!("{}", bin.get_rram_data().len());
 
     println!("Encrypting file {} and sending on port {}", file_name, port_name);
 
