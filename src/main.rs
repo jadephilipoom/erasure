@@ -24,7 +24,7 @@ struct CiphertextWriter {
     serial: Box<dyn SerialPort>,
     shifter: ShiftXor<16>,
     rram_data_end: usize,
-    rram_offset: usize,
+    non_encrypted_bytelen: usize,
 }
 
 impl CiphertextWriter {
@@ -73,14 +73,11 @@ impl CiphertextWriter {
         // Accumulate rram data into shifter.
         let end = expected_rram_data.len();
         let aligned_end = end - end % Self::KEY_BYTES;
-        dbg!(end);
-        dbg!(aligned_end);
         shifter.absorb(&expected_rram_data[..aligned_end]);
         if aligned_end < rram_offset {
             let mut data = vec![0u8;rram_offset - aligned_end];
             data[..end - aligned_end].copy_from_slice(&expected_rram_data[aligned_end..]);
             shifter.absorb(&data);
-            dbg!(data.len());
         }
 
         CiphertextWriter {
@@ -88,9 +85,9 @@ impl CiphertextWriter {
             bytes_written: 0,
             cipher: cipher,
             serial: serial,
-            rram_data_end: end,
-            rram_offset: rram_offset,
             shifter: shifter,
+            rram_data_end: end,
+            non_encrypted_bytelen: rram_offset,
         }
     }
 
@@ -141,11 +138,11 @@ impl CiphertextWriter {
         let stride = Self::STREAM_WRITE_BYTES as u32;
         self.serial.write(&stride.to_le_bytes())
             .expect("Could not send stride length.");
-        println!("<< {}", format!("{}", stride).yellow());
+        println!("<< {}", format!("{}", stride).purple());
         let offset = self.rram_data_end as u32;
         self.serial.write(&offset.to_le_bytes())
             .expect("Could not send offset.");
-        println!("<< {}", format!("{}", offset).yellow());
+        println!("<< {}", format!("{}", offset).purple());
 
         println!("Reading error code...");
         let err = self.read_u32();
@@ -158,10 +155,6 @@ impl CiphertextWriter {
         println!("Reading memory length...");
         let len = self.read_u32();
         println!(">> {}", format!("{}", len).blue());
-        for _ in 0..19 {
-            let x = self.read_u32();
-            println!(">> {}", format!("{:x}", x).blue());
-        }
         len as usize
     }
 
@@ -252,21 +245,11 @@ impl CiphertextWriter {
         let result = self.serial.write_all(key_block);
         self.unwrap_serial(result, "writing key_block");
 
-        // TODO: remove
-        let x = self.read_u32();
-        println!(">> {}", format!("{}", x).blue());
-        dbg!(self.shifter.counter);
-        let x = self.read_u32();
-        println!(">> {}", format!("{}", x).blue());
-        let x = self.read_u32();
-        println!(">> {}", format!("{}", x).blue());
-        let x = self.read_u32();
-        println!(">> {}", format!("{:x}", x).blue());
-
         // Set a generous timeout for this command.
         let old_timeout = self.serial.timeout();
         self.serial.set_timeout(time::Duration::from_millis(3000)).unwrap();
 
+        println!("Reading key...");
         let mut reply = [0u8;Self::KEY_BYTES];
         let start = time::Instant::now();
         let result = self.serial.read_exact(&mut reply);
@@ -278,7 +261,7 @@ impl CiphertextWriter {
         if reply == self.key {
             println!("{}", format!("Key recovery successful in {}ms.", elapsed.as_millis()).green());
             println!("{}", format!("{:?} bytes of memory proven erased.", self.bytes_written).green());
-            println!("{}", format!("{:?} bytes of memory given a lightweight check.", self.rram_data_end).yellow());
+            println!("{}", format!("{:?} bytes of memory given a lightweight check.", self.non_encrypted_bytelen).yellow());
         } else {
             println!("{}", "Key recovery failed!".red());
             println!("Host:   {}", hex::encode(self.key));

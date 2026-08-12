@@ -6,8 +6,7 @@ pub struct ShiftXor<const N: usize> {
     seed: [u8; N],
     key_block: [u8; N],
     pending: Vec<u8>,
-    // TODO: unpub
-    pub counter: u32,
+    counter: u32,
 }
 
 impl<const N: usize> ShiftXor<N> {
