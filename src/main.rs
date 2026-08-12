@@ -107,7 +107,6 @@ impl CiphertextWriter {
     /// there are delays between output printouts then this command might not capture all output.
     fn try_send_cmd(&mut self, cmd: &str) -> Result<String, io::Error> {
         println!("<< {}", cmd.yellow());
-
         write!(self, "{}\n\r", cmd)?;
 
         // First, expect the command itself to get echoed back. This should always happen pretty
@@ -204,9 +203,9 @@ impl CiphertextWriter {
         let key_block = hex::encode(self.shifter.key());
         // Set a generous timeout for this command.
         let old_timeout = self.serial.timeout();
-        self.serial.set_timeout(time::Duration::from_millis(10_000));
+        self.serial.set_timeout(time::Duration::from_millis(10_000)).unwrap();
         let reply = self.send_cmd(format!("erase key {} {}", seed, key_block).as_str());
-        self.serial.set_timeout(old_timeout);
+        self.serial.set_timeout(old_timeout).unwrap();
         let expected = format!("key = {:02x?}\r\n", self.key);
         if expected == reply {
             println!("{}", "Key recovery successful.".green());
