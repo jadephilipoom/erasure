@@ -74,7 +74,7 @@ impl CiphertextWriter {
 
         // Send a restart command in case we already did an erasure since last boot. For the restart
         // command, we don't expect any output, so give it a very short timeout.
-        writer.try_send_cmd("erase restart", time::Duration::from_millis(1)).unwrap();
+        writer.send_cmd("erase restart");
 
         writer
     }
@@ -105,7 +105,7 @@ impl CiphertextWriter {
 
     /// Sends a command and then reads the response. Expects all output to be printed at once; if
     /// there are delays between output printouts then this command might not capture all output.
-    fn try_send_cmd(&mut self, cmd: &str, timeout: time::Duration) -> Result<String, io::Error> {
+    fn try_send_cmd(&mut self, cmd: &str) -> Result<String, io::Error> {
         println!("<< {}", cmd.yellow());
 
         write!(self, "{}\n\r", cmd)?;
@@ -118,21 +118,19 @@ impl CiphertextWriter {
         // Wait a for further output data with the specified timeout.
         let start = time::Instant::now();
         while self.serial.bytes_to_read().unwrap() == 0 {
-            if start.elapsed() > timeout {
+            if start.elapsed() > self.serial.timeout() {
                 // No output doesn't necessarily mean an error here; some commands just don't
                 // produce output.
                 break;
             }
         }
-        println!("{} milliseconds elapsed until output, {} bytes to read", start.elapsed().as_millis(), self.serial.bytes_to_read().unwrap());
 
         // Read and return any remaining output.
         self.read_and_print_all()
     }
 
     fn send_cmd(&mut self, cmd: &str) -> String {
-        // By default, use the serial connection timeout. Panic on error.
-        self.try_send_cmd(cmd, self.serial.timeout()).unwrap()
+        self.try_send_cmd(cmd).unwrap()
     }
 
     fn get_target_len(&mut self) -> usize {
@@ -204,9 +202,11 @@ impl CiphertextWriter {
         // Send the seed and the key block across the serial interface.
         let seed = hex::encode(self.shifter.seed());
         let key_block = hex::encode(self.shifter.key());
-        let reply = self.try_send_cmd(
-            format!("erase key {} {}", seed, key_block).as_str(),
-            time::Duration::from_millis(10_000)).unwrap();
+        // Set a generous timeout for this command.
+        let old_timeout = self.serial.timeout();
+        self.serial.set_timeout(time::Duration::from_millis(10_000));
+        let reply = self.send_cmd(format!("erase key {} {}", seed, key_block).as_str());
+        self.serial.set_timeout(old_timeout);
         let expected = format!("key = {:02x?}\r\n", self.key);
         if expected == reply {
             println!("{}", "Key recovery successful.".green());
@@ -229,7 +229,7 @@ fn main() {
     println!("Encrypting file {} and sending on port {}", file_name, port_name);
 
     let port = serialport::new(port_name, 1_000_000)
-        .timeout(time::Duration::from_millis(1000))
+        .timeout(time::Duration::from_millis(100))
         .open()
         .expect("Failed to open port");
 
