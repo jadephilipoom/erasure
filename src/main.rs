@@ -12,8 +12,10 @@ use std::thread;
 use std::time;
 
 mod shiftxor;
+mod progress;
 
 use crate::shiftxor::ShiftXor;
+use crate::progress::Progress;
 
 type Aes128Ctr = ctr::Ctr32LE<aes::Aes128>;
 
@@ -87,7 +89,7 @@ impl CiphertextWriter {
         let msg = String::from_utf8(buf)
             .expect("Could not decode serial read as UTF-8");
         for line in msg.lines() {
-            println!(">> {}", line.blue());
+            println!("\r>> {}", line.blue());
         }
         Ok(msg)
     }
@@ -107,7 +109,7 @@ impl CiphertextWriter {
     /// Sends the command over the serial port and waits for it to get echoed back. Note: this does
     /// not wait for any output!
     fn try_send_cmd(&mut self, cmd: &str) -> Result<(), io::Error> {
-        println!("<< {}", cmd.yellow());
+        println!("\r<< {}", cmd.yellow());
         write!(self, "{}\n\r", cmd)?;
 
         // Expect the command itself to get echoed back. This should always happen pretty much
@@ -167,10 +169,7 @@ impl CiphertextWriter {
         let mut ciphertext = [0u8;Self::STREAM_WRITE_BYTES];
         self.cipher.apply_keystream_b2b(plaintext, &mut ciphertext);
         self.shifter.absorb(&ciphertext);
-        self.send_cmd(format!("erase write-bin {:?}", ciphertext.len())
-            .as_str());
         self.write_all(&ciphertext).expect("Error writing binary data");
-        self.get_cmd_response().unwrap();
         self.bytes_written += ciphertext.len();
     }
 
@@ -179,15 +178,25 @@ impl CiphertextWriter {
 
         // We generally expect the plaintext to be much shorter than the target length; panic if
         // that's not the case.
-        if (plaintext.len() + 1).div_ceil(Self::STREAM_WRITE_BYTES) > target_bytelen / Self::STREAM_WRITE_BYTES {
+        let block_size = 16; // AES block size
+        let ct_blocks = target_bytelen / block_size;
+        if (plaintext.len() + 1).div_ceil(block_size) > ct_blocks {
             panic!("Data to be encrypted will not fit in space available.");
         }
+
+        let ct_bytelen = ct_blocks * block_size;
+        self.send_cmd(format!("erase write-bin {:?}", ct_bytelen)
+            .as_str());
+
+        // TODO: read terminal width?
+        let progress = Progress::new(ct_bytelen, 50);
 
         // Encrypt full chunks of the input and send the ciphertext.
         let mut offset: usize = 0;
         while offset + Self::STREAM_WRITE_BYTES <= plaintext.len() {
             self.encrypt_and_send_chunk(&plaintext[offset..offset+Self::STREAM_WRITE_BYTES]);
             offset += Self::STREAM_WRITE_BYTES;
+            progress.update(offset);
         }
 
         // Handle the last (partial) block of plaintext. From the while loop above we have the
@@ -198,13 +207,19 @@ impl CiphertextWriter {
         buf[plaintext.len() - offset] = 0x80;
         self.encrypt_and_send_chunk(&buf);
         offset += Self::STREAM_WRITE_BYTES;
+        progress.update(offset);
 
         // Use all-zero chunks for any remaining space.
         let zero_buf = [0u8; Self::STREAM_WRITE_BYTES];
         while offset + Self::STREAM_WRITE_BYTES <= target_bytelen {
             self.encrypt_and_send_chunk(&zero_buf);
             offset += Self::STREAM_WRITE_BYTES;
+            progress.update(offset);
         }
+        progress.done();
+
+        thread::sleep(time::Duration::from_millis(1000));
+        self.get_cmd_response().unwrap();
     }
 
     fn check_key_recovery(&mut self) {
