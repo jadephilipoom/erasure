@@ -80,16 +80,11 @@ impl CiphertextWriter {
     }
 
     fn read_and_print_all(&mut self) -> Result<String, io::Error> {
-        let mut msg = String::new();
-        while self.serial.bytes_to_read().unwrap() != 0 {
-            println!("{:?}", self.serial.bytes_to_read());
-            // The length of this buffer sets the max read size. I didn't find much guidance on a
-            // good setting here so the choice is pretty much arbitrary.
-            let mut buf = [0u8;256];
-            let nbytes = self.serial.read(&mut buf).unwrap();
-            msg.push_str(str::from_utf8(&buf[..nbytes])
-                .expect("Could not decode serial read as UTF-8"));
-        }
+        let nbytes = self.serial.bytes_to_read().unwrap();
+        let mut buf = vec![0u8;nbytes as usize];
+        self.serial.read_exact(&mut buf)?;
+        let msg = String::from_utf8(buf)
+            .expect("Could not decode serial read as UTF-8");
         for line in msg.lines() {
             println!(">> {}", line.blue());
         }
@@ -123,6 +118,7 @@ impl CiphertextWriter {
             }
         }
         println!("{} milliseconds elapsed until output, {} bytes to read", start.elapsed().as_millis(), self.serial.bytes_to_read()?);
+        thread::sleep(time::Duration::from_millis(10));
         self.expect_response(cmd)?;
         self.expect_response("\n\r\n")?;
 
