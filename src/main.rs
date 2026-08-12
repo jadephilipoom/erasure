@@ -1,10 +1,13 @@
 use ctr::cipher::{KeyIvInit, StreamCipher};
 use rand::Rng;
+use serialport::SerialPort;
 use sha2::Sha256;
 use sha2::Digest;
 use std::env;
+use std::io::{Error, Write};
 use std::fs;
 use std::process;
+use std::time;
 
 /// Iteratively performs ShiftXOR function as described in the SUANT paper.
 struct ShiftXor<const N: usize> {
@@ -97,7 +100,19 @@ type Aes128Ctr = ctr::Ctr32LE<aes::Aes128>;
 
 struct CiphertextWriter {
     cipher: Aes128Ctr,
+    serial: Box<dyn SerialPort>,
     shifter: ShiftXor<16>
+}
+
+impl Write for CiphertextWriter {
+    fn write(&mut self, buf: &[u8]) -> Result<usize, Error> {
+        print!("{}", str::from_utf8(buf).unwrap());
+        self.serial.write(buf)
+    }
+
+    fn flush(&mut self) -> Result<(), Error> {
+        self.serial.flush()
+    }
 }
 
 impl CiphertextWriter {
@@ -105,7 +120,7 @@ impl CiphertextWriter {
     /// multiple of the ShiftXor block size.
     const STREAM_WRITE_BYTES: usize = 32;
 
-    fn new() -> Self {
+    fn new(serial: Box<dyn SerialPort>) -> Self {
         // Generate a random key (under the hood, accesses OS randomness).
         // TODO: use getrandom instead
         // TODO: 256-bit keys?
@@ -126,19 +141,43 @@ impl CiphertextWriter {
         let iv = [0u8;16];
         let cipher = Aes128Ctr::new_from_slices(&key, &iv)
             .expect("Unable to initialize cipher");
+
         CiphertextWriter {
             cipher: cipher,
+            serial: serial,
             shifter: shifter,
         }
     }
 
-    fn send(&self, msg: &str) {
-        // TODO: actually send
-        println!("{}", msg);
+    fn read_and_print_all(&mut self) {
+        println!("to read: {:?}", self.serial.bytes_to_read());
+        let mut msg = String::new();
+        /*
+        while self.serial.bytes_to_read().unwrap() != 0 {
+            // The length of this buffer sets the max read size. I didn't find much guidance on a
+            // good setting here so the choice is pretty much arbitrary.
+            let mut buf = [0u8;1024];
+            let nbytes = self.serial.read(&mut buf)
+                .expect("Could not read from serial");
+            msg.push_str(str::from_utf8(&buf[..nbytes])
+                .expect("Could not decode serial read as UTF-8"));
+        }
+        */
+        self.serial.read_to_string(&mut msg)
+            .ok();
+            // .expect("Could not read from serial");
+        for line in msg.lines() {
+            println!(">> {}", line);
+        }
     }
 
-    fn get_target_len(&self) -> usize {
-        // TODO: get the length from the serial interface
+    fn get_target_len(&mut self) -> usize {
+        // Read to clear the buffer.
+        self.read_and_print_all();
+        write!(self, "erase len\n\r")
+            .expect("Could not write to serial");
+        // Read output.
+        self.read_and_print_all();
         1024
     }
 
@@ -148,7 +187,8 @@ impl CiphertextWriter {
         let mut ciphertext = [0u8;Self::STREAM_WRITE_BYTES];
         self.cipher.apply_keystream_b2b(plaintext, &mut ciphertext);
         self.shifter.absorb(&ciphertext);
-        self.send(format!("erase write {}", hex::encode(ciphertext)).as_str());
+        write!(self, "erase write {}\n\r", hex::encode(ciphertext))
+            .expect("Could not write to serial");
     }
 
     fn encrypt_and_send(&mut self, plaintext: &[u8]) {
@@ -184,27 +224,39 @@ impl CiphertextWriter {
         }
     }
 
-    fn send_key_block(&self) {
+    fn send_key_block(&mut self) {
         // Send the seed and the key block across the serial interface.
         let seed = hex::encode(self.shifter.seed());
         let key_block = hex::encode(self.shifter.key());
-        self.send(format!("erase key {} {}", seed, key_block).as_str());
+        write!(self, "erase key {} {}\n\r", seed, key_block)
+            .expect("Could not write key block to serial");
     }
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    if args.len() != 2 {
-        println!("Error: expected 2 arguments, got {:?}", args.len());
+    if args.len() != 3 {
+        println!("Usage: erasure PORT FILE");
         process::exit(1);
     }
 
-    let plaintext = fs::read(args[1].as_str())
+    let port_name = &args[1];
+    let file_name = &args[2];
+    println!("Encrypting file {} and sending on port {}", file_name, port_name);
+
+    let port = serialport::new(port_name, 1_000_000)
+        .timeout(time::Duration::from_millis(10000))
+        .open()
+        .expect("Failed to open port");
+
+    let plaintext = fs::read(file_name.as_str())
         .expect("Could not open file");
 
-    let mut writer = CiphertextWriter::new();
+    let mut writer = CiphertextWriter::new(port);
+    println!("length: {:?}", writer.get_target_len());
     writer.encrypt_and_send(&plaintext);
     writer.send_key_block();
+    println!("length: {:?}", writer.get_target_len());
 }
 
 
