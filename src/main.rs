@@ -23,7 +23,7 @@ struct CiphertextWriter {
     cipher: Aes128Ctr,
     serial: Box<dyn SerialPort>,
     shifter: ShiftXor<16>,
-    rram_data_end: usize,
+    device_program_end: usize,
     non_encrypted_bytelen: usize,
 }
 
@@ -35,7 +35,7 @@ impl CiphertextWriter {
     /// Determines the ShiftXor block size.
     const KEY_BYTES: usize = 16;
 
-    fn new(serial: Box<dyn SerialPort>, expected_rram_data: Vec<u8>) -> Self {
+    fn new(serial: Box<dyn SerialPort>, expected_device_program: Vec<u8>) -> Self {
         // Generate a random key (under the hood, accesses OS randomness).
         // TODO: 256-bit keys?
         let mut key = [0u8; Self::KEY_BYTES];
@@ -58,19 +58,19 @@ impl CiphertextWriter {
         let iv = [0u8; 16];
         let cipher = Aes128Ctr::new_from_slices(&key, &iv).expect("Unable to initialize cipher");
 
-        // If the RRAM data is not aligned to the shifter block size, fix it.
-        let mut rram_offset = expected_rram_data.len();
-        if rram_offset % Self::KEY_BYTES != 0 {
-            rram_offset += Self::KEY_BYTES - rram_offset % Self::KEY_BYTES;
+        // If the program data is not aligned to the shifter block size, fix it.
+        let mut device_program_offset = expected_device_program.len();
+        if device_program_offset % Self::KEY_BYTES != 0 {
+            device_program_offset += Self::KEY_BYTES - device_program_offset % Self::KEY_BYTES;
         }
 
-        // Accumulate rram data into shifter.
-        let end = expected_rram_data.len();
+        // Accumulate device program data into shifter.
+        let end = expected_device_program.len();
         let aligned_end = end - end % Self::KEY_BYTES;
-        shifter.absorb(&expected_rram_data[..aligned_end]);
-        if aligned_end < rram_offset {
-            let mut data = vec![0u8; rram_offset - aligned_end];
-            data[..end - aligned_end].copy_from_slice(&expected_rram_data[aligned_end..]);
+        shifter.absorb(&expected_device_program[..aligned_end]);
+        if aligned_end < device_program_offset {
+            let mut data = vec![0u8; device_program_offset - aligned_end];
+            data[..end - aligned_end].copy_from_slice(&expected_device_program[aligned_end..]);
             shifter.absorb(&data);
         }
 
@@ -80,8 +80,8 @@ impl CiphertextWriter {
             cipher: cipher,
             serial: serial,
             shifter: shifter,
-            rram_data_end: end,
-            non_encrypted_bytelen: rram_offset,
+            device_program_end: end,
+            non_encrypted_bytelen: device_program_offset,
         }
     }
 
@@ -133,7 +133,7 @@ impl CiphertextWriter {
             .write(&stride.to_le_bytes())
             .expect("Could not send stride length.");
         println!("<< {}", format!("{}", stride).purple());
-        let offset = self.rram_data_end as u32;
+        let offset = self.device_program_end as u32;
         self.serial
             .write(&offset.to_le_bytes())
             .expect("Could not send offset.");
@@ -314,11 +314,13 @@ impl LoadedBinary<'_> {
         data
     }
 
-    /// Get the data that is expected to be in RRAM.
-    fn get_rram_data(&self) -> Vec<u8> {
-        // We expect only two non-empty sections in RRAM, the .text and .rodata sections. This
-        // relies on some assumptions about the linker script that might need to change if the
-        // linker script or platform changes.
+    /// Get the program that is expected to be loaded on the device
+    ///
+    /// Creates a buffer that concatenates the .text and .rodata sections, with padding in between
+    /// if necessary to align the .rodata section start to 4 bytes. Panics if this does not match
+    /// the memory layout in the binary. It might need to be updated when linker scripts change, or
+    /// adjusted for different platforms with different layouts.
+    fn get_device_program(&self) -> Vec<u8> {
         let text = self.get_section_data(".text");
         let text_hdr = self.get_section_header(".text");
         let rodata = self.get_section_data(".rodata");
@@ -403,7 +405,7 @@ fn main() {
 
     let plaintext = fs::read(file_name.as_str()).expect("Could not open file");
 
-    let mut writer = CiphertextWriter::new(port, bin.get_rram_data());
+    let mut writer = CiphertextWriter::new(port, bin.get_device_program());
     writer.encrypt_and_send(&plaintext);
     writer.check_key_recovery();
 }
