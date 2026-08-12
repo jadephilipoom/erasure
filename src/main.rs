@@ -1,5 +1,6 @@
 use ctr::cipher::{KeyIvInit, StreamCipher};
 use rand::Rng;
+use regex::regex;
 use serialport::SerialPort;
 use sha2::Sha256;
 use sha2::Digest;
@@ -222,8 +223,14 @@ impl CiphertextWriter {
                 panic!("Serial port read error: {:?}", e)
             }
         }
-        self.send_cmd("erase len");
-        128
+        let reply = self.send_cmd("erase len");
+        if regex!(r"\d+ bytes remaining").is_match(&reply) {
+            let count_str = reply.split(" ").next().unwrap();
+            usize::from_str_radix(count_str, 10)
+                .expect("Could not interpret bytes remaining as decimal")
+        } else {
+            panic!("Unexpected response to length command: {}", reply);
+        }
     }
 
     /// Encrypt a chunk of data and send it to the serial interface. The plaintext slice must be
@@ -298,7 +305,6 @@ fn main() {
         .expect("Could not open file");
 
     let mut writer = CiphertextWriter::new(port);
-    println!("length: {:?}", writer.get_target_len());
     writer.encrypt_and_send(&plaintext);
     writer.send_key_block();
     println!("length: {:?}", writer.get_target_len());
