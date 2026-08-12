@@ -185,7 +185,7 @@ impl CiphertextWriter {
         thread::sleep(self.serial.timeout());
 
         // Expect the command itself to get echoed back immediately.
-        self.expect_response(format!("{}\n\r\n\r", cmd).as_str());
+        self.expect_response(cmd);
 
         // Read and return any remaining output.
         self.read_and_print_all()
