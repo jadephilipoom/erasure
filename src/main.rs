@@ -8,6 +8,7 @@ use std::io;
 use std::io::Write;
 use std::fs;
 use std::process;
+use std::thread;
 use std::time;
 
 mod shiftxor;
@@ -103,24 +104,26 @@ impl CiphertextWriter {
         }
     }
 
-    /// Sends a command and then reads the response. Expects all output to be printed at once; if
-    /// there are delays between output printouts then this command might not capture all output.
-    fn try_send_cmd(&mut self, cmd: &str) -> Result<String, io::Error> {
+    /// Sends the command over the serial port and waits for it to get echoed back. Note: this does
+    /// not wait for any output!
+    fn try_send_cmd(&mut self, cmd: &str) -> Result<(), io::Error> {
         println!("<< {}", cmd.yellow());
         write!(self, "{}\n\r", cmd)?;
 
-        // First, expect the command itself to get echoed back. This should always happen pretty
-        // much immediately.
+        // Expect the command itself to get echoed back. This should always happen pretty much
+        // immediately.
         self.expect_response(cmd)?;
-        self.expect_response("\n\r\n")?;
+        self.expect_response("\n\r\n")
+    }
 
-        // Wait a for further output data with the specified timeout.
+    /// Reads an expected response from serial. Expects all output to be printed at once; if there
+    /// are delays between output printouts then this command might not capture all output.
+    fn get_cmd_response(&mut self) -> Result<String, io::Error> {
+        // Wait for a response.
         let start = time::Instant::now();
         while self.serial.bytes_to_read().unwrap() == 0 {
             if start.elapsed() > self.serial.timeout() {
-                // No output doesn't necessarily mean an error here; some commands just don't
-                // produce output.
-                break;
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "Timed out waiting for response to command"));
             }
         }
 
@@ -128,8 +131,13 @@ impl CiphertextWriter {
         self.read_and_print_all()
     }
 
-    fn send_cmd(&mut self, cmd: &str) -> String {
+    fn send_cmd(&mut self, cmd: &str) {
         self.try_send_cmd(cmd).unwrap()
+    }
+
+    fn send_cmd_get_response(&mut self, cmd: &str) -> String {
+        self.send_cmd(cmd);
+        self.get_cmd_response().expect("Command failed")
     }
 
     fn get_target_len(&mut self) -> usize {
@@ -143,7 +151,7 @@ impl CiphertextWriter {
                 panic!("Serial port read error: {:?}", e)
             }
         }
-        let reply = self.send_cmd("erase len");
+        let reply = self.send_cmd_get_response("erase len");
         if regex!(r"\d+ bytes remaining").is_match(&reply) {
             let count_str = reply.split(" ").next().unwrap();
             usize::from_str_radix(count_str, 10)
@@ -159,8 +167,10 @@ impl CiphertextWriter {
         let mut ciphertext = [0u8;Self::STREAM_WRITE_BYTES];
         self.cipher.apply_keystream_b2b(plaintext, &mut ciphertext);
         self.shifter.absorb(&ciphertext);
-        self.send_cmd(format!("erase write {}", hex::encode(ciphertext))
+        self.send_cmd(format!("erase write-bin {:?}", ciphertext.len())
             .as_str());
+        self.write_all(&ciphertext).expect("Error writing binary data");
+        self.get_cmd_response().unwrap();
         self.bytes_written += ciphertext.len();
     }
 
@@ -204,7 +214,7 @@ impl CiphertextWriter {
         // Set a generous timeout for this command.
         let old_timeout = self.serial.timeout();
         self.serial.set_timeout(time::Duration::from_millis(10_000)).unwrap();
-        let reply = self.send_cmd(format!("erase key {} {}", seed, key_block).as_str());
+        let reply = self.send_cmd_get_response(format!("erase key {} {}", seed, key_block).as_str());
         self.serial.set_timeout(old_timeout).unwrap();
         let expected = format!("key = {:02x?}\r\n", self.key);
         if expected == reply {
@@ -228,7 +238,7 @@ fn main() {
     println!("Encrypting file {} and sending on port {}", file_name, port_name);
 
     let port = serialport::new(port_name, 1_000_000)
-        .timeout(time::Duration::from_millis(100))
+        .timeout(time::Duration::from_millis(1000))
         .open()
         .expect("Failed to open port");
 
