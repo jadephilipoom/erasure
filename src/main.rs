@@ -25,16 +25,6 @@ struct CiphertextWriter {
     shifter: ShiftXor<16>
 }
 
-impl io::Write for CiphertextWriter {
-    fn write(&mut self, buf: &[u8]) -> Result<usize, io::Error> {
-        self.serial.write(buf)
-    }
-
-    fn flush(&mut self) -> Result<(), io::Error> {
-        self.serial.flush()
-    }
-}
-
 impl CiphertextWriter {
     /// Size of the blocks of ciphertext we will stream across the serial interface. Should be a
     /// multiple of the ShiftXor block size.
@@ -77,8 +67,37 @@ impl CiphertextWriter {
         }
     }
 
+    /// Convenience function for smooth handling of timeout errors on the serial interface. If we
+    /// get a timeout, we want to gracefully exit instead of panicking.
+    fn unwrap_serial<T>(&mut self, x: Result<T,io::Error>, descr: &str) -> T {
+        match x {
+            Ok(t) => t,
+            Err(e) => {
+                if e.kind() == io::ErrorKind::TimedOut {
+                    // A timeout might mean a panic; try to read the panic message off of the serial
+                    // interface before exit.
+                    self.read_and_print_all().ok();
+                    println!("{}", format!("Timeout {}, try rebooting?", descr).red());
+                    process::exit(1);
+                } else {
+                    panic!("Error {}: {}", descr, e);
+                }
+            }
+        }
+    }
+
+    fn read_u32(&mut self) -> u32 {
+        let mut reply = [0u8;4];
+        let result = self.serial.read_exact(&mut reply);
+        self.unwrap_serial(result, "reading length");
+        u32::from_le_bytes(reply)
+    }
+
     fn read_and_print_all(&mut self) -> Result<String, io::Error> {
         let nbytes = self.serial.bytes_to_read().unwrap();
+        if nbytes == 0 {
+            return Ok(String::new());
+        }
         let mut buf = vec![0u8;nbytes as usize];
         self.serial.read_exact(&mut buf)?;
         let msg = String::from_utf8(buf)
@@ -90,66 +109,49 @@ impl CiphertextWriter {
     }
 
     fn get_target_len(&mut self) -> usize {
-        // Send any single character to indicate we're ready.
-        self.serial.write(&[0]).expect("Could not send wakeup.");
-        let mut reply = [0u8;4];
-        match self.serial.read_exact(&mut reply) {
-            Ok(()) => (),
-            Err(e) => {
-                if e.kind() == io::ErrorKind::TimedOut {
-                    // A timeout might mean a panic; try to read the panic message off of the serial
-                    // interface before exit.
-                    self.read_and_print_all()
-                        .expect("unable to read panic message");
-                    panic!("Timeout reading length, try rebooting?");
-                } else {
-                    panic!("Error reading length: {:?}", e);
-                }
-            }
-        }
-        let len = u32::from_le_bytes(reply);
+        // Send stride length to initiate handshake.
+        let stride = Self::STREAM_WRITE_BYTES as u32;
+        self.serial.write(&stride.to_le_bytes())
+            .expect("Could not send stride length.");
+        println!("<< {}", format!("{}", stride).yellow());
+
+        let len = self.read_u32();
+        println!(">> {}", format!("{}", len).blue());
         len as usize
     }
 
-    /// Writes ciphertext over serial and accumulates it into the shifter. Data length must be a
-    /// multiple of the shiftxor chunk size.
-    fn write_ciphertext_block(&mut self, data: &[u8]) {
-        self.shifter.absorb(&data);
-        match self.write_all(&data) {
-            Ok(()) => (),
-            Err(e) => {
-                println!(""); // makes error go below progress bar
-                if e.kind() == io::ErrorKind::TimedOut {
-                    // A timeout might mean a panic; try to read the panic message off of the serial
-                    // interface before exit.
-                    self.read_and_print_all()
-                        .expect("unable to read panic message");
-                    panic!("Timeout writing ciphertext");
-                } else {
-                    panic!("Error writing ciphertext: {:?}", e);
-                }
-            }
-        }
+    /// Do a single stream write..
+    fn write_ciphertext_block(&mut self, data: &[u8;Self::STREAM_WRITE_BYTES]) {
+        self.shifter.absorb(data);
+        let result = self.serial.write_all(data);
+        self.unwrap_serial(result, "writing ciphertext");
         self.bytes_written += data.len();
+
+        // Wait for an ack from the device.
+        let reply = self.read_u32();
+        if reply as usize != self.bytes_written {
+            panic!("Device write count ({}) does not match host count ({})!", reply, self.bytes_written);
+        }
     }
 
     fn encrypt_and_send(&mut self, plaintext: &[u8]) {
         // We expect that this is called only once in between restarts.
         assert_eq!(self.bytes_written, 0);
-        println!("Requesting target byte length...");
         let target_bytelen: usize = self.get_target_len();
-        println!(">> {}", format!("{}", target_bytelen).blue());
+
+        // Some basic checks on the write sizes.
+        let block_size = 16; // AES block size
+        assert!(target_bytelen % Self::STREAM_WRITE_BYTES == 0);
+        assert!(Self::STREAM_WRITE_BYTES % block_size == 0);
 
         // We generally expect the plaintext to be much shorter than the target length; panic if
         // that's not the case.
-        let block_size = 16; // AES block size
         let ct_blocks = target_bytelen / block_size;
         if (plaintext.len() + 1).div_ceil(block_size) > ct_blocks {
             panic!("Data to be encrypted will not fit in space available.");
         }
 
-        let ct_bytelen = ct_blocks * block_size;
-        let progress = Progress::new(ct_bytelen, 50);
+        let progress = Progress::new(target_bytelen, 50);
         
         // Prepare a temp buffer for the ciphertext.
         let mut ciphertext = [0u8;Self::STREAM_WRITE_BYTES];
@@ -174,28 +176,40 @@ impl CiphertextWriter {
 
         // Use all-zero chunks for any remaining space.
         let zero_buf = [0u8; Self::STREAM_WRITE_BYTES];
-        while self.bytes_written < ct_bytelen {
+        while self.bytes_written < target_bytelen {
             self.cipher.apply_keystream_b2b(&zero_buf, &mut ciphertext);
             self.write_ciphertext_block(&ciphertext);
             progress.update(self.bytes_written);
         }
+
         progress.done();
     }
 
     fn check_key_recovery(&mut self) {
+        // Send the seed and the key block across the serial interface.
+        let seed_len = self.read_u32();
+        println!(">> {}", format!("{}", seed_len).blue());
+        self.read_and_print_all().unwrap();
+        println!("Sending seed...");
+        let seed = self.shifter.seed();
+        let result = self.serial.write_all(seed);
+        self.unwrap_serial(result, "writing seed");
+        let key_len = self.read_u32();
+        println!(">> {}", format!("{}", key_len).blue());
+        println!("Sending key...");
+        let key_block = self.shifter.key();
+        let result = self.serial.write_all(key_block);
+        self.unwrap_serial(result, "writing key_block");
+        self.read_and_print_all().unwrap();
+
         // Set a generous timeout for this command.
         let old_timeout = self.serial.timeout();
-        self.serial.set_timeout(time::Duration::from_millis(10_000)).unwrap();
+        self.serial.set_timeout(time::Duration::from_millis(3000)).unwrap();
 
-        // Send the seed and the key block across the serial interface.
-        self.serial.write_all(self.shifter.seed()).expect("Error writing seed");
-        self.serial.write_all(self.shifter.key()).expect("Error writing key");
         let mut reply = [0u8;Self::KEY_BYTES];
-        self.serial.read_exact(&mut reply)
-            .expect("Could not read recovered key");
-
-        // Reset the serial timer.
+        let result = self.serial.read_exact(&mut reply);
         self.serial.set_timeout(old_timeout).unwrap();
+        self.unwrap_serial(result, "reading key");
 
         if reply == self.key {
             println!("{}", "Key recovery successful.".green());
