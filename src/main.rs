@@ -118,7 +118,7 @@ impl CiphertextWriter {
             }
         }
         println!("{} milliseconds elapsed until output, {} bytes to read", start.elapsed().as_millis(), self.serial.bytes_to_read()?);
-        thread::sleep(time::Duration::from_millis(10));
+        thread::sleep(time::Duration::from_millis(1));
         self.expect_response(cmd)?;
         self.expect_response("\n\r\n")?;
 
