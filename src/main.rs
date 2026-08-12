@@ -22,7 +22,8 @@ struct CiphertextWriter {
     bytes_written: usize,
     cipher: Aes128Ctr,
     serial: Box<dyn SerialPort>,
-    shifter: ShiftXor<16>
+    shifter: ShiftXor<16>,
+    rram_offset: usize,
 }
 
 impl CiphertextWriter {
@@ -33,7 +34,7 @@ impl CiphertextWriter {
     /// Determines the ShiftXor block size.
     const KEY_BYTES: usize = 16;
 
-    fn new(serial: Box<dyn SerialPort>) -> Self {
+    fn new(serial: Box<dyn SerialPort>, expected_rram_data: Vec<u8>) -> Self {
         // Generate a random key (under the hood, accesses OS randomness).
         // TODO: use getrandom instead
         // TODO: 256-bit keys?
@@ -45,7 +46,7 @@ impl CiphertextWriter {
         let mut seed = [8u8;Self::KEY_BYTES];
         rand::rng().fill_bytes(&mut seed);
         println!("s: {}", hex::encode(seed));
-        let shifter = ShiftXor::<{ Self:: KEY_BYTES }>::new(&seed, &key);
+        let mut shifter = ShiftXor::<{ Self::KEY_BYTES }>::new(&seed, &key);
 
         // Flush any lingering data in the serial connection.
         serial.clear(serialport::ClearBuffer::All).unwrap();
@@ -58,11 +59,26 @@ impl CiphertextWriter {
         let cipher = Aes128Ctr::new_from_slices(&key, &iv)
             .expect("Unable to initialize cipher");
 
+        // Accumulate rram data into shifter.
+        let (chunks, rem) = expected_rram_data.as_chunks::<{ Self::KEY_BYTES }>();
+        for c in chunks {
+            shifter.absorb(c);
+        }
+
+        let mut rram_offset = expected_rram_data.len();
+        if rem.len() > 0 {
+            rram_offset += Self::KEY_BYTES;
+            let mut final_chunk = [0u8; Self::KEY_BYTES];
+            final_chunk[..rem.len()].copy_from_slice(rem);
+            shifter.absorb(&final_chunk);
+        }
+
         CiphertextWriter {
             key: key,
             bytes_written: 0,
             cipher: cipher,
             serial: serial,
+            rram_offset: rram_offset,
             shifter: shifter,
         }
     }
@@ -110,11 +126,15 @@ impl CiphertextWriter {
 
     fn get_target_len(&mut self) -> usize {
         // Send stride length to initiate handshake.
-        println!("Sending stride length...");
+        println!("Sending stride length and offset...");
         let stride = Self::STREAM_WRITE_BYTES as u32;
         self.serial.write(&stride.to_le_bytes())
             .expect("Could not send stride length.");
         println!("<< {}", format!("{}", stride).yellow());
+        let offset = self.rram_offset as u32;
+        self.serial.write(&offset.to_le_bytes())
+            .expect("Could not send offset.");
+        println!("<< {}", format!("{}", offset).yellow());
 
         println!("Reading memory length...");
         let len = self.read_u32();
@@ -143,8 +163,9 @@ impl CiphertextWriter {
 
         // Some basic checks on the write sizes.
         let block_size = 16; // AES block size
-        assert!(target_bytelen % Self::STREAM_WRITE_BYTES == 0);
+        assert!(target_bytelen % Self::KEY_BYTES == 0);
         assert!(Self::STREAM_WRITE_BYTES % block_size == 0);
+        assert!(Self::STREAM_WRITE_BYTES % Self::KEY_BYTES == 0);
 
         // We generally expect the plaintext to be much shorter than the target length; panic if
         // that's not the case.
@@ -178,13 +199,26 @@ impl CiphertextWriter {
 
         // Use all-zero chunks for any remaining space.
         let zero_buf = [0u8; Self::STREAM_WRITE_BYTES];
-        while self.bytes_written < target_bytelen {
+        let aligned_end = target_bytelen - target_bytelen % Self::STREAM_WRITE_BYTES;
+        while self.bytes_written < aligned_end {
             self.cipher.apply_keystream_b2b(&zero_buf, &mut ciphertext);
             self.write_ciphertext_block(&ciphertext);
             progress.update(self.bytes_written);
         }
 
+        // Final write might be smaller than the usual stream block. Relies on the assumption that
+        // the target length is a multiple of the key byte size.
+        while self.bytes_written < target_bytelen {
+            let data = &zero_buf[..Self::KEY_BYTES];
+            self.shifter.absorb(data);
+            let result = self.serial.write_all(data);
+            self.unwrap_serial(result, "writing final padding bytes");
+            self.bytes_written += data.len();
+        }
+
         progress.done();
+
+        dbg!(self.bytes_written);
     }
 
     fn check_key_recovery(&mut self) {
@@ -207,12 +241,17 @@ impl CiphertextWriter {
         let elapsed = start.elapsed();
         self.serial.set_timeout(old_timeout).unwrap();
         self.unwrap_serial(result, "reading key");
+        println!("\r>> {}", hex::encode(reply).blue());
 
         if reply == self.key {
             println!("{}", format!("Key recovery successful in {}ms.", elapsed.as_millis()).green());
             println!("{}", format!("{:?} bytes of memory proven erased.", self.bytes_written).green());
+            println!("{}", format!("{:?} bytes of memory given a lightweight check.", self.rram_offset).yellow());
         } else {
-            panic!("Key recovery failed!\nHost:   {:02x?}\nTarget: {:02x?}", self.key, reply);
+            println!("{}", "Key recovery failed!".red());
+            println!("Host:   {}", hex::encode(self.key));
+            println!("Target: {}", hex::encode(reply));
+            process::exit(1);
         }
     }
 }
@@ -303,7 +342,8 @@ fn main() {
     let port_name = &args[1];
     let file_name = &args[2];
     let binary_name = &args[3];
-    println!("Encrypting file {} and sending on port {}", file_name, port_name);
+
+    println!("Analyzing binary {}", binary_name);
 
     let binary_file_data = std::fs::read(binary_name)
         .expect("Could not open binary file");
@@ -313,7 +353,8 @@ fn main() {
     };
     bin.pretty_print_sections();
     println!("{}", bin.get_rram_data().len());
-    process::exit(0);
+
+    println!("Encrypting file {} and sending on port {}", file_name, port_name);
 
     let port = serialport::new(port_name, 1_000_000)
         .timeout(time::Duration::from_millis(1000))
@@ -323,7 +364,7 @@ fn main() {
     let plaintext = fs::read(file_name.as_str())
         .expect("Could not open file");
 
-    let mut writer = CiphertextWriter::new(port);
+    let mut writer = CiphertextWriter::new(port, bin.get_rram_data());
     writer.encrypt_and_send(&plaintext);
     writer.check_key_recovery();
 }
