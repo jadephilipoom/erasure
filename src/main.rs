@@ -255,9 +255,9 @@ impl CiphertextWriter {
         println!("\r>> {}", hex::encode(reply).blue());
 
         if reply == self.key {
-            println!("{}", format!("Key recovery successful in {}ms.", elapsed.as_millis()).green().bold());
-            println!("{}", format!("{:?} bytes of memory proven erased.", self.bytes_written).green());
-            println!("{}", format!("{:?} bytes of memory given a lightweight check.", self.non_encrypted_bytelen).yellow());
+            println!("{}", format!("Key recovery successful in {}ms.", elapsed.as_millis()).green());
+            println!("{}", format!("  {:?} bytes of memory given a lightweight check.", self.non_encrypted_bytelen).yellow());
+            println!("{}", format!("  {:?} bytes of memory proven erased.", self.bytes_written).green());
         } else {
             println!("{}", "Key recovery failed!".red());
             println!("Host:   {}", hex::encode(self.key));
