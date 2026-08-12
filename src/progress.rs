@@ -12,7 +12,10 @@ impl Progress {
         }
         print!("]");
         print!("  {} / {} (0%)", 0, total);
-        Progress { total: total, width: width }
+        Progress {
+            total: total,
+            width: width,
+        }
     }
 
     pub fn update(&self, current: usize) {

@@ -1,5 +1,5 @@
-use sha2::Sha256;
 use sha2::Digest;
+use sha2::Sha256;
 
 /// Iteratively performs ShiftXOR function as described in the SUANT paper.
 pub struct ShiftXor<const N: usize> {
@@ -18,8 +18,8 @@ impl<const N: usize> ShiftXor<N> {
 
     pub fn new(seed: &[u8], key_block: &[u8]) -> Self {
         ShiftXor {
-            seed: <[u8;N]>::try_from(seed).expect("Invalid seed length!"),
-            key_block: <[u8;N]>::try_from(key_block).expect("Invalid key length!"),
+            seed: <[u8; N]>::try_from(seed).expect("Invalid seed length!"),
+            key_block: <[u8; N]>::try_from(key_block).expect("Invalid key length!"),
             pending: Vec::with_capacity(32), // capacity: size of hash output
             counter: 0,
         }
@@ -49,7 +49,7 @@ impl<const N: usize> ShiftXor<N> {
         }
     }
 
-    fn absorb_chunk(&mut self, ciphertext: &[u8;N]) {
+    fn absorb_chunk(&mut self, ciphertext: &[u8; N]) {
         // XOR the key block with a cyclic shift of the ciphertext.
         let shift = self.get_shift();
         for i in 0..ciphertext.len() {
@@ -57,7 +57,11 @@ impl<const N: usize> ShiftXor<N> {
             let ct_upper_idx = ((shift / 8) + i + 1) % ciphertext.len();
             let ct_lower = ciphertext[ct_lower_idx] >> (shift % 8);
             let ct_upper = ciphertext[ct_upper_idx] & ((1 << (shift % 8)) - 1);
-            let ct = if shift % 8 == 0 { ct_lower } else { ct_lower | (ct_upper << (8 - (shift % 8))) };
+            let ct = if shift % 8 == 0 {
+                ct_lower
+            } else {
+                ct_lower | (ct_upper << (8 - (shift % 8)))
+            };
             self.key_block[i] ^= ct;
         }
     }
@@ -87,26 +91,47 @@ mod tests {
 
     #[test]
     fn test_empty() {
-        let seed: [u8;16] = [0xff;16];
-        let key_block: [u8;16] = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff ];
+        let seed: [u8; 16] = [0xff; 16];
+        let key_block: [u8; 16] = [
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+            0xee, 0xff,
+        ];
         let shifter = ShiftXor::<16>::new(&seed, &key_block);
         assert_eq!(shifter.key(), key_block);
     }
 
     #[test]
     fn test_basic() {
-        let seed: [u8;16] = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff ];
-        let key_block: [u8;16] = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff ];
+        let seed: [u8; 16] = [
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+            0xee, 0xff,
+        ];
+        let key_block: [u8; 16] = [
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+            0xee, 0xff,
+        ];
         let mut shifter = ShiftXor::<16>::new(&seed, &key_block);
         shifter.absorb(&seed);
         shifter.absorb(&seed);
-        assert_eq!(shifter.key(), [0xff, 0x89, 0x22, 0xb8, 0x55, 0xab, 0x00, 0xda, 0xbb, 0xcd, 0x66, 0xfc, 0x11, 0xef, 0x44, 0x9e]);
+        assert_eq!(
+            shifter.key(),
+            [
+                0xff, 0x89, 0x22, 0xb8, 0x55, 0xab, 0x00, 0xda, 0xbb, 0xcd, 0x66, 0xfc, 0x11, 0xef,
+                0x44, 0x9e
+            ]
+        );
     }
 
     #[test]
     fn test_symmetric() {
-        let seed: [u8;16] = [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f ];
-        let key_block: [u8;16] = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff ];
+        let seed: [u8; 16] = [
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+            0x0e, 0x0f,
+        ];
+        let key_block: [u8; 16] = [
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+            0xee, 0xff,
+        ];
         let mut shifter = ShiftXor::<16>::new(&seed, &key_block);
         shifter.absorb(&seed);
         shifter.absorb(&seed);
