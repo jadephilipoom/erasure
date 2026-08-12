@@ -23,7 +23,7 @@ on the chip.
 xtask bao1x-erasure-dabao` and copy the erasure.uf2 file onto the chip, then
 press PROG to boot. 
 2. Run the host-side code, pointing it at the serial port that communicates with
-   the chip. For example:
+   the chip and the device-side binary. For example:
 
 ```
 cargo run -- /dev/ttyACM0 test.txt ../xous-core/target/riscv32imac-unknown-none-elf/release/erasure
@@ -36,14 +36,17 @@ The expected interaction between host and device is:
 1. Host sends:
    1a. 4 bytes indicating requested ack frequency in bytes.
    1b. 4 bytes indicating the size of the device-side code.
-2. Device sends 4 bytes indicating requested total byte length.
-3. Repeat until total byte length is reached:
+2. Device sends 4 bytes indicating an error code (0 = no error).
+   2a. If there was an error, the protocol does not continue.
+3. Device sends 4 bytes indicating requested total byte length.
+4. Repeat until total byte length is reached:
    3a. Host sends <ack frequency> bytes, or remaining bytes if less.
    3b. Device sends 4 bytes, encoding the total bytes received so far.
-4. Host sends the key and seed blocks.
-5. Device sends the recovered key.
+5. Host sends the key and seed blocks.
+6. Device sends the recovered key.
 
-Optionally, the device can then decrypt the ciphertext using the key.
+Optionally, the device can then decrypt the ciphertext using the key, but it
+does not need to communicate further with the host for that.
 
 ## Cryptography
 
@@ -60,10 +63,11 @@ of operations on the ciphertext and then use XOR to recover the encryption key.
 It sends this to the host to prove that it had all the ciphertext in memory
 simultaneously. It can then decrypt the ciphertext to get its new state.
 
-There are a couple of divergences from SUANT in the current implementation, most
-notably that the paper assumes that the device-side code is in read-only memory
-and does not need to be covered by the erasure check. We don't make the same
-assumption.
+There are a couple of divergences from SUANT in the current implementation. We
+compute the shifts for shift-xor slightly differently, although this is a minor
+point. More notably, the paper assumes that the device-side code is in read-only
+memory and does not need to be covered by the erasure check. We don't make the
+same assumption.
 
 Instead, we analyze the device-side binary to determine a certain amount of data
 to *not* overwrite, and then incorporate the plaintext code along with the
