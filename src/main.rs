@@ -1,7 +1,6 @@
 use ctr::cipher::{KeyIvInit, StreamCipher};
 use colored::Colorize;
 use rand::Rng;
-use regex::regex;
 use serialport::SerialPort;
 use std::env;
 use std::io;
@@ -19,7 +18,7 @@ use crate::progress::Progress;
 type Aes128Ctr = ctr::Ctr32LE<aes::Aes128>;
 
 struct CiphertextWriter {
-    key: [u8;16],
+    key: [u8;Self::KEY_BYTES],
     bytes_written: usize,
     cipher: Aes128Ctr,
     serial: Box<dyn SerialPort>,
@@ -41,19 +40,22 @@ impl CiphertextWriter {
     /// multiple of the ShiftXor block size.
     const STREAM_WRITE_BYTES: usize = 1024;
 
+    /// Determines the ShiftXor block size.
+    const KEY_BYTES: usize = 16;
+
     fn new(serial: Box<dyn SerialPort>) -> Self {
         // Generate a random key (under the hood, accesses OS randomness).
         // TODO: use getrandom instead
         // TODO: 256-bit keys?
-        let mut key = [0u8;16];
+        let mut key = [0u8;Self::KEY_BYTES];
         rand::rng().fill_bytes(&mut key);
         println!("k: {}", hex::encode(key));
 
         // Initialize the shifter.
-        let mut seed = [8u8;16];
+        let mut seed = [8u8;Self::KEY_BYTES];
         rand::rng().fill_bytes(&mut seed);
         println!("s: {}", hex::encode(seed));
-        let shifter = ShiftXor::<16>::new(&seed, &key);
+        let shifter = ShiftXor::<{ Self:: KEY_BYTES }>::new(&seed, &key);
 
         // Flush any lingering data in the serial connection.
         serial.clear(serialport::ClearBuffer::All).unwrap();
@@ -66,19 +68,13 @@ impl CiphertextWriter {
         let cipher = Aes128Ctr::new_from_slices(&key, &iv)
             .expect("Unable to initialize cipher");
 
-        let mut writer = CiphertextWriter {
+        CiphertextWriter {
             key: key,
             bytes_written: 0,
             cipher: cipher,
             serial: serial,
             shifter: shifter,
-        };
-
-        // Send a restart command in case we already did an erasure since last boot. For the restart
-        // command, we don't expect any output, so give it a very short timeout.
-        writer.send_cmd("erase restart");
-
-        writer
+        }
     }
 
     fn read_and_print_all(&mut self) -> Result<String, io::Error> {
@@ -93,87 +89,56 @@ impl CiphertextWriter {
         Ok(msg)
     }
 
-    fn expect_response(&mut self, expected: &str) -> Result<(), io::Error> {
-        let mut buf = vec![0u8; expected.len()];
-        self.serial.read_exact(&mut buf)?;
-        let actual = str::from_utf8(&buf)
-            .expect("Could not decode serial read as UTF-8");
-        if actual == expected {
-            Ok(())
-        } else {
-            Err(io::Error::new(io::ErrorKind::Other, format!("Unexpected response over serial: expected {}, got {}", expected, actual)))
-        }
-    }
-
-    /// Sends the command over the serial port and waits for it to get echoed back. Note: this does
-    /// not wait for any output!
-    fn try_send_cmd(&mut self, cmd: &str) -> Result<(), io::Error> {
-        println!("\r<< {}", cmd.yellow());
-        write!(self, "{}\n\r", cmd)?;
-
-        // Expect the command itself to get echoed back. This should always happen pretty much
-        // immediately.
-        self.expect_response(cmd)?;
-        self.expect_response("\n\r\n")
-    }
-
-    /// Reads an expected response from serial. Expects all output to be printed at once; if there
-    /// are delays between output printouts then this command might not capture all output.
-    fn get_cmd_response(&mut self) -> Result<String, io::Error> {
-        // Wait for a response.
-        let start = time::Instant::now();
-        while self.serial.bytes_to_read().unwrap() == 0 {
-            if start.elapsed() > self.serial.timeout() {
-                return Err(io::Error::new(io::ErrorKind::TimedOut, "Timed out waiting for response to command"));
-            }
-        }
-
-        // Read and return any remaining output.
-        self.read_and_print_all()
-    }
-
-    fn send_cmd(&mut self, cmd: &str) {
-        self.try_send_cmd(cmd).unwrap()
-    }
-
-    fn send_cmd_get_response(&mut self, cmd: &str) -> String {
-        self.send_cmd(cmd);
-        self.get_cmd_response().expect("Command failed")
-    }
-
     fn get_target_len(&mut self) -> usize {
-        match self.serial.bytes_to_read() {
-            Ok(0) => (),
-            Ok(_) => {
-                // Print to clear the buffer.
-                self.read_and_print_all().expect("Read error");
-            }
-            e => {
-                panic!("Serial port read error: {:?}", e)
+        // Send any single character to indicate we're ready.
+        self.serial.write(&[0]).expect("Could not send wakeup.");
+        let mut reply = [0u8;4];
+        match self.serial.read_exact(&mut reply) {
+            Ok(()) => (),
+            Err(e) => {
+                if e.kind() == io::ErrorKind::TimedOut {
+                    // A timeout might mean a panic; try to read the panic message off of the serial
+                    // interface before exit.
+                    self.read_and_print_all()
+                        .expect("unable to read panic message");
+                    panic!("Timeout reading length, try rebooting?");
+                } else {
+                    panic!("Error reading length: {:?}", e);
+                }
             }
         }
-        let reply = self.send_cmd_get_response("erase len");
-        if regex!(r"\d+ bytes remaining").is_match(&reply) {
-            let count_str = reply.split(" ").next().unwrap();
-            usize::from_str_radix(count_str, 10)
-                .expect("Could not interpret bytes remaining as decimal")
-        } else {
-            panic!("Unexpected response to length command: {}", reply);
-        }
+        let len = u32::from_le_bytes(reply);
+        len as usize
     }
 
-    /// Send a chunk of data to the serial interface. The data length must be a multiple of the
-    /// shiftxor chunk size.
-    fn send_data(&mut self, data: &[u8]) {
+    /// Writes ciphertext over serial and accumulates it into the shifter. Data length must be a
+    /// multiple of the shiftxor chunk size.
+    fn write_ciphertext_block(&mut self, data: &[u8]) {
         self.shifter.absorb(&data);
-        self.write_all(&data).expect("Error writing binary data");
+        match self.write_all(&data) {
+            Ok(()) => (),
+            Err(e) => {
+                println!(""); // makes error go below progress bar
+                if e.kind() == io::ErrorKind::TimedOut {
+                    // A timeout might mean a panic; try to read the panic message off of the serial
+                    // interface before exit.
+                    self.read_and_print_all()
+                        .expect("unable to read panic message");
+                    panic!("Timeout writing ciphertext");
+                } else {
+                    panic!("Error writing ciphertext: {:?}", e);
+                }
+            }
+        }
         self.bytes_written += data.len();
     }
 
     fn encrypt_and_send(&mut self, plaintext: &[u8]) {
         // We expect that this is called only once in between restarts.
         assert_eq!(self.bytes_written, 0);
+        println!("Requesting target byte length...");
         let target_bytelen: usize = self.get_target_len();
+        println!(">> {}", format!("{}", target_bytelen).blue());
 
         // We generally expect the plaintext to be much shorter than the target length; panic if
         // that's not the case.
@@ -184,9 +149,6 @@ impl CiphertextWriter {
         }
 
         let ct_bytelen = ct_blocks * block_size;
-        self.send_cmd(format!("erase write-bin {:?}", ct_bytelen)
-            .as_str());
-
         let progress = Progress::new(ct_bytelen, 50);
         
         // Prepare a temp buffer for the ciphertext.
@@ -196,7 +158,7 @@ impl CiphertextWriter {
         let (chunks, tail) = plaintext.as_chunks::<{ Self::STREAM_WRITE_BYTES }>();
         for c in chunks {
             self.cipher.apply_keystream_b2b(c, &mut ciphertext);
-            self.send_data(&ciphertext);
+            self.write_ciphertext_block(&ciphertext);
             progress.update(self.bytes_written);
         }
 
@@ -207,36 +169,39 @@ impl CiphertextWriter {
         tail_block[..tail.len()].copy_from_slice(tail);
         tail_block[tail.len()] = 0x80;
         self.cipher.apply_keystream_b2b(&tail_block, &mut ciphertext);
-        self.send_data(&ciphertext);
+        self.write_ciphertext_block(&ciphertext);
         progress.update(self.bytes_written);
 
         // Use all-zero chunks for any remaining space.
         let zero_buf = [0u8; Self::STREAM_WRITE_BYTES];
         while self.bytes_written < ct_bytelen {
             self.cipher.apply_keystream_b2b(&zero_buf, &mut ciphertext);
-            self.send_data(&ciphertext);
+            self.write_ciphertext_block(&ciphertext);
             progress.update(self.bytes_written);
         }
         progress.done();
-
-        self.get_cmd_response().unwrap();
     }
 
     fn check_key_recovery(&mut self) {
-        // Send the seed and the key block across the serial interface.
-        let seed = hex::encode(self.shifter.seed());
-        let key_block = hex::encode(self.shifter.key());
         // Set a generous timeout for this command.
         let old_timeout = self.serial.timeout();
         self.serial.set_timeout(time::Duration::from_millis(10_000)).unwrap();
-        let reply = self.send_cmd_get_response(format!("erase key {} {}", seed, key_block).as_str());
+
+        // Send the seed and the key block across the serial interface.
+        self.serial.write_all(self.shifter.seed()).expect("Error writing seed");
+        self.serial.write_all(self.shifter.key()).expect("Error writing key");
+        let mut reply = [0u8;Self::KEY_BYTES];
+        self.serial.read_exact(&mut reply)
+            .expect("Could not read recovered key");
+
+        // Reset the serial timer.
         self.serial.set_timeout(old_timeout).unwrap();
-        let expected = format!("key = {:02x?}\r\n", self.key);
-        if expected == reply {
+
+        if reply == self.key {
             println!("{}", "Key recovery successful.".green());
             println!("{}", format!("{:?} bytes of memory proven erased.", self.bytes_written).green());
         } else {
-            panic!("Key recovery failed!\nHost:   {}\nTarget: {}", expected, reply);
+            panic!("Key recovery failed!\nHost:   {:02x?}\nTarget: {:02x?}", self.key, reply);
         }
     }
 }
