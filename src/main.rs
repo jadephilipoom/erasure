@@ -110,19 +110,13 @@ impl CiphertextWriter {
 
         write!(self, "{}\n\r", cmd)?;
 
-        // First, expect the command itself to get echoed back. This should always happen.
-        let mut start = time::Instant::now();
-        while self.serial.bytes_to_read().unwrap() == 0 {
-            if start.elapsed() > timeout {
-                return Err(io::Error::new(io::ErrorKind::TimedOut, format!("Timed out after {:?}ms waiting for command echo", timeout.as_millis())))
-            }
-        }
-        println!("{} milliseconds elapsed until output, {} bytes to read", start.elapsed().as_millis(), self.serial.bytes_to_read()?);
+        // First, expect the command itself to get echoed back. This should always happen pretty
+        // much immediately.
         self.expect_response(cmd)?;
         self.expect_response("\n\r\n")?;
 
         // Wait a bit for further output data.
-        start = time::Instant::now();
+        let start = time::Instant::now();
         while self.serial.bytes_to_read().unwrap() == 0 {
             if start.elapsed() > timeout {
                 // No output doesn't necessarily mean an error here; some commands just don't
