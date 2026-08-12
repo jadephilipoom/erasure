@@ -62,7 +62,7 @@ impl CiphertextWriter {
 
         // RRAM offset must be aligned to 32 bytes (minium update granularity) and also to the key
         // size.
-        const RRAM_GRANULARITY: usize = 32;
+        const RRAM_GRANULARITY: usize = 16;
         assert!(Self::KEY_BYTES <= RRAM_GRANULARITY);
         assert!(RRAM_GRANULARITY % Self::KEY_BYTES == 0);
         let mut rram_offset = expected_rram_data.len();
