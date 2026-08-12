@@ -160,6 +160,10 @@ impl CiphertextWriter {
         println!("Reading memory length...");
         let len = self.read_u32();
         println!(">> {}", format!("{}", len).blue());
+        let start = self.read_u32();
+        println!(">> {}", format!("{:x}", start).blue());
+        let end = self.read_u32();
+        println!(">> {}", format!("{:x}", end).blue());
         len as usize
     }
 
