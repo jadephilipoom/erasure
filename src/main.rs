@@ -1,4 +1,5 @@
 use ctr::cipher::{KeyIvInit, StreamCipher};
+use colored::Colorize;
 use rand::Rng;
 use regex::regex;
 use serialport::SerialPort;
@@ -46,7 +47,7 @@ impl CiphertextWriter {
         println!("k: {}", hex::encode(key));
 
         // Initialize the shifter.
-        let mut seed = [0u8;16];
+        let mut seed = [8u8;16];
         rand::rng().fill_bytes(&mut seed);
         println!("s: {}", hex::encode(seed));
         let shifter = ShiftXor::<16>::new(&seed, &key);
@@ -82,7 +83,7 @@ impl CiphertextWriter {
                 .expect("Could not decode serial read as UTF-8"));
         }
         for line in msg.lines() {
-            println!(">> {}", line);
+            println!(">> {}", line.blue());
         }
         Ok(msg)
     }
@@ -114,7 +115,7 @@ impl CiphertextWriter {
     }
 
     fn send_cmd(&mut self, cmd: &str) -> String {
-        println!("<< {}", cmd);
+        println!("<< {}", cmd.yellow());
 
         // This choice of retries was arbitrary and may be tuned.
         let max_attempts = 2;
@@ -161,15 +162,14 @@ impl CiphertextWriter {
         self.shifter.absorb(&ciphertext);
         self.send_cmd(format!("erase write {}", hex::encode(ciphertext))
             .as_str());
-        self.send_key_block();
     }
 
     fn encrypt_and_send(&mut self, plaintext: &[u8]) {
         let target_bytelen: usize = self.get_target_len();
 
         // We generally expect the plaintext to be much shorter than the target length; panic if
-        // that's not the case. The check below is more conservative than it really needs to be.
-        if plaintext.len() + Self::STREAM_WRITE_BYTES > target_bytelen {
+        // that's not the case.
+        if (plaintext.len() + 1).div_ceil(Self::STREAM_WRITE_BYTES) > target_bytelen / Self::STREAM_WRITE_BYTES {
             panic!("Data to be encrypted will not fit in space available.");
         }
 
@@ -217,7 +217,7 @@ fn main() {
     println!("Encrypting file {} and sending on port {}", file_name, port_name);
 
     let port = serialport::new(port_name, 1_000_000)
-        .timeout(time::Duration::from_millis(1))
+        .timeout(time::Duration::from_millis(5))
         .open()
         .expect("Failed to open port");
 
@@ -225,9 +225,7 @@ fn main() {
         .expect("Could not open file");
 
     let mut writer = CiphertextWriter::new(port);
-    writer.send_key_block();
     writer.encrypt_and_send(&plaintext);
     writer.send_key_block();
-    println!("length: {:?}", writer.get_target_len());
 }
 
