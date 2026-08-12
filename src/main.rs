@@ -16,28 +16,22 @@ use std::time;
 struct ShiftXor<const N: usize> {
     seed: [u8; N],
     key_block: [u8; N],
-    // TODO: change to VecDeque to avoid copies
     pending: Vec<u8>,
     counter: u32,
 }
 
 impl<const N: usize> ShiftXor<N> {
-    // TODO: try making this a parameter <N>
-    const CHUNK_BYTES: usize = 16;
-
     /// Derived size of shift parameter. Unlike in the SUANT paper, we round up to the next byte
     /// boundary when pulling bytes from the extraction function to avoid shifting bits within
     /// bytes.
     const SHIFT_BITS: usize = 7;
-    // TODO: this definition gives an error because bit_width() is not stable
-    // const SHIFT_BITS: usize = (Self::CHUNK_BYTES * 8).bit_width() as usize;
     const SHIFT_BYTES: usize = (Self::SHIFT_BITS + 7) / 8;
 
     fn new(seed: &[u8], key_block: &[u8]) -> Self {
         ShiftXor {
             seed: <[u8;N]>::try_from(seed).expect("Invalid seed length!"),
             key_block: <[u8;N]>::try_from(key_block).expect("Invalid key length!"),
-            pending: Vec::with_capacity(32), // size of hash output
+            pending: Vec::with_capacity(32), // capacity: size of hash output
             counter: 0,
         }
     }
@@ -46,10 +40,12 @@ impl<const N: usize> ShiftXor<N> {
         if self.pending.len() >= Self::SHIFT_BYTES {
             // Decode shift from the prefix pending bytes (little-endian).
             let mut shift: u32 = 0;
-            for &b in self.pending.iter().rev() {
+            for &b in self.pending[..Self::SHIFT_BYTES].iter().rev() {
                 shift <<= 8;
                 shift |= b as u32;
             }
+            // Note: VecDeque would avoid copies here but pending is always pretty small, so it's
+            // not a huge deal.
             let tail = self.pending.split_off(Self::SHIFT_BYTES);
             self.pending = tail;
             shift as usize
@@ -65,7 +61,7 @@ impl<const N: usize> ShiftXor<N> {
     }
 
     fn absorb_chunk(&mut self, ciphertext: &[u8]) {
-        if ciphertext.len() != Self::CHUNK_BYTES {
+        if ciphertext.len() != N {
             panic!("Invalid chunk length: {:?}", ciphertext.len());
         }
 
@@ -79,13 +75,14 @@ impl<const N: usize> ShiftXor<N> {
             let ct = if shift % 8 == 0 { ct_lower } else { ct_lower | (ct_upper << (8 - (shift % 8))) };
             self.key_block[i] ^= ct;
         }
+        println!("shift = {:08x?}, ct = {:02x?}, kb = {:02x?}", shift, ciphertext, self.key_block)
     }
 
     fn absorb(&mut self, ciphertext: &[u8]) {
-        if ciphertext.len() % Self::CHUNK_BYTES != 0 {
+        if ciphertext.len() % N != 0 {
             panic!("Invalid ciphertext length: {:?}", ciphertext.len());
         }
-        for chunk in ciphertext.chunks(Self::CHUNK_BYTES) {
+        for chunk in ciphertext.chunks(N) {
             self.absorb_chunk(chunk);
         }
     }
