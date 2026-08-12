@@ -8,7 +8,6 @@ use std::io;
 use std::io::Write;
 use std::fs;
 use std::process;
-use std::thread;
 use std::time;
 
 mod shiftxor;
@@ -40,7 +39,7 @@ impl io::Write for CiphertextWriter {
 impl CiphertextWriter {
     /// Size of the blocks of ciphertext we will stream across the serial interface. Should be a
     /// multiple of the ShiftXor block size.
-    const STREAM_WRITE_BYTES: usize = 2048;
+    const STREAM_WRITE_BYTES: usize = 1024;
 
     fn new(serial: Box<dyn SerialPort>) -> Self {
         // Generate a random key (under the hood, accesses OS randomness).
@@ -163,17 +162,17 @@ impl CiphertextWriter {
         }
     }
 
-    /// Encrypt a chunk of data and send it to the serial interface. The plaintext slice must be
-    /// exactly STREAM_WRITE_BYTES in length, otherwise this panics.
-    fn encrypt_and_send_chunk(&mut self, plaintext: &[u8]) {
-        let mut ciphertext = [0u8;Self::STREAM_WRITE_BYTES];
-        self.cipher.apply_keystream_b2b(plaintext, &mut ciphertext);
-        self.shifter.absorb(&ciphertext);
-        self.write_all(&ciphertext).expect("Error writing binary data");
-        self.bytes_written += ciphertext.len();
+    /// Send a chunk of data to the serial interface. The data length must be a multiple of the
+    /// shiftxor chunk size.
+    fn send_data(&mut self, data: &[u8]) {
+        self.shifter.absorb(&data);
+        self.write_all(&data).expect("Error writing binary data");
+        self.bytes_written += data.len();
     }
 
     fn encrypt_and_send(&mut self, plaintext: &[u8]) {
+        // We expect that this is called only once in between restarts.
+        assert_eq!(self.bytes_written, 0);
         let target_bytelen: usize = self.get_target_len();
 
         // We generally expect the plaintext to be much shorter than the target length; panic if
@@ -188,37 +187,38 @@ impl CiphertextWriter {
         self.send_cmd(format!("erase write-bin {:?}", ct_bytelen)
             .as_str());
 
-        // TODO: read terminal width?
         let progress = Progress::new(ct_bytelen, 50);
+        
+        // Prepare a temp buffer for the ciphertext.
+        let mut ciphertext = [0u8;Self::STREAM_WRITE_BYTES];
 
         // Encrypt full chunks of the input and send the ciphertext.
-        let mut offset: usize = 0;
-        while offset + Self::STREAM_WRITE_BYTES <= plaintext.len() {
-            self.encrypt_and_send_chunk(&plaintext[offset..offset+Self::STREAM_WRITE_BYTES]);
-            offset += Self::STREAM_WRITE_BYTES;
-            progress.update(offset);
+        let (chunks, tail) = plaintext.as_chunks::<{ Self::STREAM_WRITE_BYTES }>();
+        for c in chunks {
+            self.cipher.apply_keystream_b2b(c, &mut ciphertext);
+            self.send_data(&ciphertext);
+            progress.update(self.bytes_written);
         }
 
         // Handle the last (partial) block of plaintext. From the while loop above we have the
         // guarantee that offset + Self::STREAM_WRITE_BYTES > plaintext.len(), so we can fit at
         // least one padding block. We pad the data with 0x80 followed by all zeroes.
-        let mut buf = [0u8; Self::STREAM_WRITE_BYTES];
-        buf[..plaintext.len() - offset].copy_from_slice(&plaintext[offset..]);
-        buf[plaintext.len() - offset] = 0x80;
-        self.encrypt_and_send_chunk(&buf);
-        offset += Self::STREAM_WRITE_BYTES;
-        progress.update(offset);
+        let mut tail_block = [0u8; Self::STREAM_WRITE_BYTES];
+        tail_block[..tail.len()].copy_from_slice(tail);
+        tail_block[tail.len()] = 0x80;
+        self.cipher.apply_keystream_b2b(&tail_block, &mut ciphertext);
+        self.send_data(&ciphertext);
+        progress.update(self.bytes_written);
 
         // Use all-zero chunks for any remaining space.
         let zero_buf = [0u8; Self::STREAM_WRITE_BYTES];
-        while offset + Self::STREAM_WRITE_BYTES <= target_bytelen {
-            self.encrypt_and_send_chunk(&zero_buf);
-            offset += Self::STREAM_WRITE_BYTES;
-            progress.update(offset);
+        while self.bytes_written < ct_bytelen {
+            self.cipher.apply_keystream_b2b(&zero_buf, &mut ciphertext);
+            self.send_data(&ciphertext);
+            progress.update(self.bytes_written);
         }
         progress.done();
 
-        thread::sleep(time::Duration::from_millis(1000));
         self.get_cmd_response().unwrap();
     }
 
