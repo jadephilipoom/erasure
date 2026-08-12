@@ -8,7 +8,6 @@ use std::io;
 use std::io::Write;
 use std::fs;
 use std::process;
-use std::thread;
 use std::time;
 
 mod shiftxor;
@@ -38,7 +37,7 @@ impl io::Write for CiphertextWriter {
 impl CiphertextWriter {
     /// Size of the blocks of ciphertext we will stream across the serial interface. Should be a
     /// multiple of the ShiftXor block size.
-    const STREAM_WRITE_BYTES: usize = 1024;
+    const STREAM_WRITE_BYTES: usize = 2048;
 
     fn new(serial: Box<dyn SerialPort>) -> Self {
         // Generate a random key (under the hood, accesses OS randomness).
@@ -55,7 +54,7 @@ impl CiphertextWriter {
         let shifter = ShiftXor::<16>::new(&seed, &key);
 
         // Flush any lingering data in the serial connection.
-        serial.clear(serialport::ClearBuffer::All);
+        serial.clear(serialport::ClearBuffer::All).unwrap();
 
         // Set up the cipher.
         // WARNING: a constant all-zero IV is not safe in general! But since our key is random and we
@@ -73,8 +72,9 @@ impl CiphertextWriter {
             shifter: shifter,
         };
 
-        // Send a restart command in case we already did an erasure since last boot.
-        writer.send_cmd("erase restart");
+        // Send a restart command in case we already did an erasure since last boot. For the restart
+        // command, we don't expect any output, so give it a very short timeout.
+        writer.try_send_cmd("erase restart", time::Duration::from_millis(1)).unwrap();
 
         writer
     }
@@ -115,7 +115,7 @@ impl CiphertextWriter {
         self.expect_response(cmd)?;
         self.expect_response("\n\r\n")?;
 
-        // Wait a bit for further output data.
+        // Wait a for further output data with the specified timeout.
         let start = time::Instant::now();
         while self.serial.bytes_to_read().unwrap() == 0 {
             if start.elapsed() > timeout {
