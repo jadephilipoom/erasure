@@ -39,12 +39,12 @@ impl CiphertextWriter {
         // Generate a random key (under the hood, accesses OS randomness).
         // TODO: 256-bit keys?
         let mut key = [0u8; Self::KEY_BYTES];
-        getrandom::fill(&mut key);
+        getrandom::fill(&mut key).unwrap();
         println!("k: {}", hex::encode(key));
 
         // Initialize the shifter.
         let mut seed = [8u8; Self::KEY_BYTES];
-        getrandom::fill(&mut seed);
+        getrandom::fill(&mut seed).unwrap();
         println!("s: {}", hex::encode(seed));
         let mut shifter = ShiftXor::<{ Self::KEY_BYTES }>::new(&seed, &key);
 
