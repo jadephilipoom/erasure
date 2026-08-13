@@ -1,4 +1,4 @@
-# Host-side Secure Erasure Harness for Bao1x
+# Host-side Secure Erasure Harness
 
 This repository holds the host-side code for (provably) wiping memory. It was
 written and tested for baochip-1x, although with the right device-side code it
