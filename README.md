@@ -19,7 +19,7 @@ on the chip.
 
 1. Get device-side code that implements the correct protocol.
     a. For baochip-1x on dabao, you can find it
-[here](https://github.com/jadephilipoom/xous-core/tree/erasure-dev). Run `cargo
+[here](https://github.com/jadephilipoom/xous-core/tree/erasure-clean). Run `cargo
 xtask bao1x-erasure-dabao` and copy the erasure.uf2 file onto the chip, then
 press PROG to boot. 
 2. Run the host-side code, pointing it at the serial port that communicates with
