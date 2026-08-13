@@ -29,6 +29,15 @@ press PROG to boot.
 cargo run -- /dev/ttyACM0 test.txt ../xous-core/target/riscv32imac-unknown-none-elf/release/erasure
 ``` 
 
+You should see something like:
+
+![Example printout from the program, showing a summary of the binary file
+followed by some communication traces, a full progress bar, and a message saying
+key recovery succeeded.](printout.png)
+
+Depending on the device-side implementation, you may need to fully reboot
+between erasure attempts.
+
 ## Protocol
 
 The expected interaction between host and device is:
