@@ -58,7 +58,6 @@ impl CiphertextWriter {
         let iv = [0u8; 16];
         let cipher = Aes128Ctr::new_from_slices(&key, &iv).expect("Unable to initialize cipher");
 
-        shifter.absorb_with_padding(expected_data);
         shifter.absorb_with_padding(expected_code);
 
         CiphertextWriter {
@@ -67,7 +66,7 @@ impl CiphertextWriter {
             cipher: cipher,
             serial: serial,
             shifter: shifter,
-            data_size: expected_data.len(),
+            data_size: expected_data.len() + 1024,
             code_size: expected_code.len(),
         }
     }
@@ -239,6 +238,11 @@ impl CiphertextWriter {
         let key_block = self.shifter.key();
         let result = self.serial.write_all(key_block);
         self.unwrap_serial(result, "writing key_block");
+
+        let mut ack = self.read_u32();
+        println!(">> {}", format!("{}", ack).blue());
+        ack = self.read_u32();
+        println!(">> {}", format!("{}", ack).blue());
 
         // Set a generous timeout for this command.
         let old_timeout = self.serial.timeout();
