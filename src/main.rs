@@ -23,8 +23,8 @@ struct CiphertextWriter {
     cipher: Aes128Ctr,
     serial: Box<dyn SerialPort>,
     shifter: ShiftXor<16>,
-    device_program_end: usize,
-    non_encrypted_bytelen: usize,
+    code_size: usize,
+    data_size: usize,
 }
 
 impl CiphertextWriter {
@@ -35,7 +35,7 @@ impl CiphertextWriter {
     /// Determines the ShiftXor block size.
     const KEY_BYTES: usize = 16;
 
-    fn new(serial: Box<dyn SerialPort>, expected_device_program: Vec<u8>) -> Self {
+    fn new(serial: Box<dyn SerialPort>, expected_code: &[u8], expected_data: &[u8]) -> Self {
         // Generate a random key (under the hood, accesses OS randomness).
         // TODO: 256-bit keys?
         let mut key = [0u8; Self::KEY_BYTES];
@@ -58,21 +58,8 @@ impl CiphertextWriter {
         let iv = [0u8; 16];
         let cipher = Aes128Ctr::new_from_slices(&key, &iv).expect("Unable to initialize cipher");
 
-        // If the program data is not aligned to the shifter block size, fix it.
-        let mut device_program_offset = expected_device_program.len();
-        if device_program_offset % Self::KEY_BYTES != 0 {
-            device_program_offset += Self::KEY_BYTES - device_program_offset % Self::KEY_BYTES;
-        }
-
-        // Accumulate device program data into shifter.
-        let end = expected_device_program.len();
-        let aligned_end = end - end % Self::KEY_BYTES;
-        shifter.absorb(&expected_device_program[..aligned_end]);
-        if aligned_end < device_program_offset {
-            let mut data = vec![0u8; device_program_offset - aligned_end];
-            data[..end - aligned_end].copy_from_slice(&expected_device_program[aligned_end..]);
-            shifter.absorb(&data);
-        }
+        shifter.absorb_with_padding(expected_data);
+        shifter.absorb_with_padding(expected_code);
 
         CiphertextWriter {
             key: key,
@@ -80,8 +67,8 @@ impl CiphertextWriter {
             cipher: cipher,
             serial: serial,
             shifter: shifter,
-            device_program_end: end,
-            non_encrypted_bytelen: device_program_offset,
+            data_size: expected_data.len(),
+            code_size: expected_code.len(),
         }
     }
 
@@ -133,11 +120,16 @@ impl CiphertextWriter {
             .write(&stride.to_le_bytes())
             .expect("Could not send stride length.");
         println!("<< {}", format!("{}", stride).purple());
-        let offset = self.device_program_end as u32;
+        let rram_offset = self.code_size as u32;
         self.serial
-            .write(&offset.to_le_bytes())
-            .expect("Could not send offset.");
-        println!("<< {}", format!("{}", offset).purple());
+            .write(&rram_offset.to_le_bytes())
+            .expect("Could not send RRAM offset.");
+        println!("<< {}", format!("{}", rram_offset).purple());
+        let data_offset = self.data_size as u32;
+        self.serial
+            .write(&data_offset.to_le_bytes())
+            .expect("Could not send data offset.");
+        println!("<< {}", format!("{}", data_offset).purple());
 
         println!("Reading error code...");
         let err = self.read_u32();
@@ -191,6 +183,7 @@ impl CiphertextWriter {
             panic!("Data to be encrypted will not fit in space available.");
         }
 
+        println!("Writing memory...");
         let progress = Progress::new(target_bytelen, 50);
 
         // Prepare a temp buffer for the ciphertext.
@@ -271,7 +264,7 @@ impl CiphertextWriter {
                 "{}",
                 format!(
                     "  {:?} bytes of memory given a lightweight check.",
-                    self.non_encrypted_bytelen
+                    self.code_size + self.data_size
                 )
                 .yellow()
             );
@@ -320,7 +313,7 @@ impl LoadedBinary<'_> {
     /// if necessary to align the .rodata section start to 4 bytes. Panics if this does not match
     /// the memory layout in the binary. It might need to be updated when linker scripts change, or
     /// adjusted for different platforms with different layouts.
-    fn get_device_program(&self) -> Vec<u8> {
+    fn get_code(&self) -> Vec<u8> {
         let text = self.get_section_data(".text");
         let text_hdr = self.get_section_header(".text");
         let rodata = self.get_section_data(".rodata");
@@ -405,7 +398,7 @@ fn main() {
 
     let plaintext = fs::read(file_name.as_str()).expect("Could not open file");
 
-    let mut writer = CiphertextWriter::new(port, bin.get_device_program());
+    let mut writer = CiphertextWriter::new(port, bin.get_code().as_slice(), bin.get_section_data(".data"));
     writer.encrypt_and_send(&plaintext);
     writer.check_key_recovery();
 }

@@ -45,6 +45,7 @@ The expected interaction between host and device is:
 1. Host sends:
    1a. 4 bytes indicating requested ack frequency in bytes.
    1b. 4 bytes indicating the size of the device-side code.
+   1c. 4 bytes indicating the size of the device-side compile-time data.
 2. Device sends 4 bytes indicating an error code (0 = no error).
    2a. If there was an error, the protocol does not continue.
 3. Device sends 4 bytes indicating requested total byte length.
@@ -56,6 +57,12 @@ The expected interaction between host and device is:
 
 Optionally, the device can then decrypt the ciphertext using the key, but it
 does not need to communicate further with the host for that.
+
+The key is computed using the concatenation of (data || code || ciphertext). The
+data and the code are included in the computation even though they are
+potentially compressible, just to add a little more friction for attacks. If the
+data/code size are not a multiple of the key size, they are padded with zeroes;
+the device side must replicate the padding.
 
 ## Cryptography
 
