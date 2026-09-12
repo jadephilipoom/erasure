@@ -24,7 +24,6 @@ struct CiphertextWriter {
     serial: Box<dyn SerialPort>,
     shifter: ShiftXor<16>,
     code_size: usize,
-    data_size: usize,
 }
 
 impl CiphertextWriter {
@@ -35,7 +34,7 @@ impl CiphertextWriter {
     /// Determines the ShiftXor block size.
     const KEY_BYTES: usize = 16;
 
-    fn new(serial: Box<dyn SerialPort>, expected_code: &[u8], expected_data: &[u8]) -> Self {
+    fn new(serial: Box<dyn SerialPort>, expected_code: &[u8]) -> Self {
         // Generate a random key (under the hood, accesses OS randomness).
         // TODO: 256-bit keys?
         let mut key = [0u8; Self::KEY_BYTES];
@@ -66,7 +65,6 @@ impl CiphertextWriter {
             cipher: cipher,
             serial: serial,
             shifter: shifter,
-            data_size: expected_data.len() + 1024,
             code_size: expected_code.len(),
         }
     }
@@ -124,11 +122,6 @@ impl CiphertextWriter {
             .write(&rram_offset.to_le_bytes())
             .expect("Could not send RRAM offset.");
         println!("<< {}", format!("{}", rram_offset).purple());
-        let data_offset = self.data_size as u32;
-        self.serial
-            .write(&data_offset.to_le_bytes())
-            .expect("Could not send data offset.");
-        println!("<< {}", format!("{}", data_offset).purple());
 
         println!("Reading error code...");
         let err = self.read_u32();
@@ -239,11 +232,6 @@ impl CiphertextWriter {
         let result = self.serial.write_all(key_block);
         self.unwrap_serial(result, "writing key_block");
 
-        let mut ack = self.read_u32();
-        println!(">> {}", format!("{}", ack).blue());
-        ack = self.read_u32();
-        println!(">> {}", format!("{}", ack).blue());
-
         // Set a generous timeout for this command.
         let old_timeout = self.serial.timeout();
         self.serial
@@ -268,7 +256,7 @@ impl CiphertextWriter {
                 "{}",
                 format!(
                     "  {:?} bytes of memory given a lightweight check.",
-                    self.code_size + self.data_size
+                    self.code_size
                 )
                 .yellow()
             );
@@ -402,7 +390,7 @@ fn main() {
 
     let plaintext = fs::read(file_name.as_str()).expect("Could not open file");
 
-    let mut writer = CiphertextWriter::new(port, bin.get_code().as_slice(), bin.get_section_data(".data"));
+    let mut writer = CiphertextWriter::new(port, bin.get_code().as_slice());
     writer.encrypt_and_send(&plaintext);
     writer.check_key_recovery();
 }
