@@ -57,6 +57,7 @@ impl CiphertextWriter {
         let iv = [0u8; 16];
         let cipher = Aes128Ctr::new_from_slices(&key, &iv).expect("Unable to initialize cipher");
 
+        // Absorb the code region into the shifter.
         shifter.absorb_with_padding(expected_code);
 
         CiphertextWriter {
@@ -141,11 +142,10 @@ impl CiphertextWriter {
         self.read_and_print_all().expect(format!("Error reading response to command: {}", cmd).as_str())
     }
 
-    /// Get the requested (remaining) ciphertext length from the device. In binary mode, this
-    /// includes the initial handshake to set up streaming writes and can only be called once at the
-    /// beginning of the operation.
-    fn get_target_len(&mut self) -> usize {
+    /// Initial handshake with the device to set up the erasure. Returns the requested length.
+    fn start_erasure(&mut self) -> usize {
         if self.repl {
+            let len_str = self.send_cmd(format!("erase restart {:08x}", self.code_size).as_str());
             let len_str = self.send_cmd("erase len");
             let len = u32::from_str_radix(&len_str.trim(), 10).expect("Cannot parse length as decimal");
             len as usize
@@ -210,7 +210,7 @@ impl CiphertextWriter {
     fn encrypt_and_send(&mut self, plaintext: &[u8]) {
         // We expect that this is called only once in between restarts.
         assert_eq!(self.bytes_written, 0);
-        let target_bytelen: usize = self.get_target_len();
+        let target_bytelen: usize = self.start_erasure();
 
         // Some basic checks on the write sizes.
         let block_size = 16; // AES block size
