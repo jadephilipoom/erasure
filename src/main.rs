@@ -24,6 +24,7 @@ struct CiphertextWriter {
     serial: Box<dyn SerialPort>,
     shifter: ShiftXor<16>,
     code_size: usize,
+    repl: bool,
 }
 
 impl CiphertextWriter {
@@ -34,9 +35,8 @@ impl CiphertextWriter {
     /// Determines the ShiftXor block size.
     const KEY_BYTES: usize = 16;
 
-    fn new(serial: Box<dyn SerialPort>, expected_code: &[u8]) -> Self {
+    fn new(repl: bool, serial: Box<dyn SerialPort>, expected_code: &[u8]) -> Self {
         // Generate a random key (under the hood, accesses OS randomness).
-        // TODO: 256-bit keys?
         let mut key = [0u8; Self::KEY_BYTES];
         getrandom::fill(&mut key).unwrap();
         println!("k: {}", hex::encode(key));
@@ -66,6 +66,7 @@ impl CiphertextWriter {
             serial: serial,
             shifter: shifter,
             code_size: expected_code.len(),
+            repl: repl
         }
     }
 
@@ -109,51 +110,100 @@ impl CiphertextWriter {
         Ok(msg)
     }
 
-    fn get_target_len(&mut self) -> usize {
-        // Send stride length to initiate handshake.
-        println!("Sending stride length and offset...");
-        let stride = Self::STREAM_WRITE_BYTES as u32;
-        self.serial
-            .write(&stride.to_le_bytes())
-            .expect("Could not send stride length.");
-        println!("<< {}", format!("{}", stride).purple());
-        let offset = self.code_size as u32;
-        self.serial
-            .write(&offset.to_le_bytes())
-            .expect("Could not send RRAM offset.");
-        println!("<< {}", format!("{}", offset).purple());
-
-        println!("Reading error code...");
-        let err = self.read_u32();
-        println!(">> {}", format!("{}", err).blue());
-        if err != 0 {
-            println!(
-                "{}",
-                format!("Nonzero error code from device: {}", err).red()
-            );
-            process::exit(1);
+    fn expect_response(&mut self, expected: &str) -> Result<(), io::Error> {
+        let mut buf = vec![0u8; expected.len()];
+        self.serial.read_exact(&mut buf)?;
+        let actual = str::from_utf8(&buf)
+            .expect("Could not decode serial read as UTF-8");
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(io::Error::new(io::ErrorKind::Other, format!("Unexpected response over serial: expected {}, got {}", expected, actual)))
         }
+    }
 
-        println!("Reading memory length...");
-        let len = self.read_u32();
-        println!(">> {}", format!("{}", len).blue());
-        len as usize
+
+    /// Attempts to send the command over the serial port in REPL mode.
+    fn try_send_cmd(&mut self, cmd: &str) -> Result<(), io::Error> {
+        println!("\r<< {}", cmd.purple());
+        write!(self.serial, "{}\n\r", cmd)?;
+
+        // Expect the command itself to get echoed back. This should always happen pretty much
+        // immediately.
+        self.expect_response(cmd)?;
+        self.expect_response("\n\r\n")
+    }
+
+    /// Sends the command over the serial port in REPL mode and gets the response (if any). May miss
+    /// the response if it is not immediate.
+    fn send_cmd(&mut self, cmd: &str) -> String {
+        self.try_send_cmd(cmd).expect(format!("Command failed: {}", cmd).as_str());
+        self.read_and_print_all().expect(format!("Error reading response to command: {}", cmd).as_str())
+    }
+
+    /// Get the requested (remaining) ciphertext length from the device. In binary mode, this
+    /// includes the initial handshake to set up streaming writes and can only be called once at the
+    /// beginning of the operation.
+    fn get_target_len(&mut self) -> usize {
+        if self.repl {
+            let len_str = self.send_cmd("erase len");
+            let len = u32::from_str_radix(&len_str.trim(), 10).expect("Cannot parse length as decimal");
+            len as usize
+        } else {
+            // Binary mode: send stride length and offset to initiate handshake.
+            println!("Sending stride length and offset...");
+            let stride = Self::STREAM_WRITE_BYTES as u32;
+            self.serial
+                .write(&stride.to_le_bytes())
+                .expect("Could not send stride length.");
+            println!("<< {}", format!("{}", stride).purple());
+            let offset = self.code_size as u32;
+            self.serial
+                .write(&offset.to_le_bytes())
+                .expect("Could not send RRAM offset.");
+            println!("<< {}", format!("{}", offset).purple());
+
+            println!("Reading error code...");
+            let err = self.read_u32();
+            println!(">> {}", format!("{}", err).blue());
+            if err != 0 {
+                println!(
+                    "{}",
+                    format!("Nonzero error code from device: {}", err).red()
+                );
+                process::exit(1);
+            }
+
+            println!("Reading memory length...");
+            let len = self.read_u32();
+            println!(">> {}", format!("{}", len).blue());
+            len as usize
+        }
     }
 
     /// Do a single stream write.
     fn write_ciphertext_block(&mut self, data: &[u8; Self::STREAM_WRITE_BYTES]) {
         self.shifter.absorb(data);
+        // In repl mode, announce the binary write beforehand.
+        if self.repl {
+            self.send_cmd(format!("erase write-bin {}", Self::STREAM_WRITE_BYTES).as_str());
+        }
         let result = self.serial.write_all(data);
         self.unwrap_serial(result, "writing ciphertext");
         self.bytes_written += data.len();
 
-        // Wait for an ack from the device.
-        let reply = self.read_u32();
-        if reply as usize != self.bytes_written {
-            panic!(
-                "Device write count ({}) does not match host count ({})!",
-                reply, self.bytes_written
-            );
+        // Get the ack from the device.
+        if self.repl {
+            let expected_ack = format!("wrote {} bytes\r\n", Self::STREAM_WRITE_BYTES);
+            self.expect_response(&expected_ack).expect("Error reading ack");
+        } else {
+            let reply = self.read_u32();
+            if reply as usize != self.bytes_written {
+                panic!(
+                    "Device write count ({}) does not match host count ({})!",
+                    reply, self.bytes_written
+                );
+            }
         }
     }
 
@@ -176,7 +226,7 @@ impl CiphertextWriter {
         }
 
         println!("Writing memory...");
-        let progress = Progress::new(target_bytelen, 50);
+        let progress = Progress::new(target_bytelen, 50, self.repl);
 
         // Prepare a temp buffer for the ciphertext.
         let mut ciphertext = [0u8; Self::STREAM_WRITE_BYTES];
@@ -219,18 +269,11 @@ impl CiphertextWriter {
             self.bytes_written += data.len();
         }
 
-        progress.update(self.bytes_written);
         progress.done();
     }
 
     fn check_key_recovery(&mut self) {
-        // Send the seed and the key block across the serial interface.
-        let seed = self.shifter.seed();
-        let result = self.serial.write_all(seed);
-        self.unwrap_serial(result, "writing seed");
-        let key_block = self.shifter.key();
-        let result = self.serial.write_all(key_block);
-        self.unwrap_serial(result, "writing key_block");
+        println!("Getting recovered key...");
 
         // Set a generous timeout for this command.
         let old_timeout = self.serial.timeout();
@@ -238,16 +281,40 @@ impl CiphertextWriter {
             .set_timeout(time::Duration::from_millis(3000))
             .unwrap();
 
-        println!("Reading key...");
-        let mut reply = [0u8; Self::KEY_BYTES];
-        let start = time::Instant::now();
-        let result = self.serial.read_exact(&mut reply);
-        let elapsed = start.elapsed();
+        // Send the seed and the key block across the serial interface.
+        let seed = self.shifter.seed();
+        let mut device_key = [0u8; Self::KEY_BYTES];
+        let elapsed: time::Duration;
+        if self.repl {
+            // REPL mode: send the erase key command
+            let start = time::Instant::now();
+            let key_block = self.shifter.key();
+            let reply = self.try_send_cmd(format!("erase key {} {}", hex::encode(seed), hex::encode(key_block)).as_str())
+                .expect("Error sending key command");
+            let mut key_hex = [0u8; Self::KEY_BYTES * 2];
+            let result = self.serial.read_exact(&mut key_hex);
+            elapsed = start.elapsed();
+            self.unwrap_serial(result, "reading key");
+            let key_bytes = hex::decode(key_hex).expect("Could not interpret key as hex");
+            self.expect_response("\r\n").expect("Error reading trailing whitespace");
+            device_key.copy_from_slice(&key_bytes);
+        } else {
+            // Binary mode; just write the seed and key and then read the response
+            let result = self.serial.write_all(seed);
+            self.unwrap_serial(result, "writing seed");
+            let key_block = self.shifter.key();
+            let result = self.serial.write_all(key_block);
+            self.unwrap_serial(result, "writing key_block");
+            let start = time::Instant::now();
+            let result = self.serial.read_exact(&mut device_key);
+            elapsed = start.elapsed();
+            self.unwrap_serial(result, "reading key");
+            println!("\r>> {}", hex::encode(device_key).blue());
+        }
         self.serial.set_timeout(old_timeout).unwrap();
-        self.unwrap_serial(result, "reading key");
-        println!("\r>> {}", hex::encode(reply).blue());
 
-        if reply == self.key {
+
+        if device_key == self.key {
             println!(
                 "{}",
                 format!("Key recovery successful in {}ms.", elapsed.as_millis()).green()
@@ -267,7 +334,7 @@ impl CiphertextWriter {
         } else {
             println!("{}", "Key recovery failed!".red());
             println!("Host:   {}", hex::encode(self.key));
-            println!("Target: {}", hex::encode(reply));
+            println!("Target: {}", hex::encode(device_key));
             process::exit(1);
         }
     }
@@ -355,9 +422,13 @@ impl LoadedBinary<'_> {
     }
 }
 
+/// Host-side harness for secure erasure of an embedded device
 #[derive(Parser)]
 struct Cli {
-    /// The serial port to use (e.g. /dev/ttyACM0)
+    /// REPL mode
+    #[arg(short, long, action)]
+    repl: bool,
+    /// The serial port for communication with the device (e.g. /dev/ttyACM0)
     port: String,
     /// The file to encrypt
     file: std::path::PathBuf,
@@ -388,7 +459,7 @@ fn main() {
 
     let plaintext = fs::read(args.file).expect("Could not open file");
 
-    let mut writer = CiphertextWriter::new(port, bin.get_code().as_slice());
+    let mut writer = CiphertextWriter::new(args.repl, port, bin.get_code().as_slice());
     writer.encrypt_and_send(&plaintext);
     writer.check_key_recovery();
 }

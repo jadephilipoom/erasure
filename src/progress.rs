@@ -2,19 +2,24 @@
 pub struct Progress {
     total: usize,
     width: usize,
+    newlines: bool,
 }
 
 impl Progress {
-    pub fn new(total: usize, width: usize) -> Self {
+    pub fn new(total: usize, width: usize, newlines: bool) -> Self {
         print!("[");
         for _ in 0..width {
             print!(" ");
         }
         print!("]");
         print!("  {} / {} (0%)", 0, total);
+        if newlines {
+            print!("\n");
+        }
         Progress {
             total: total,
             width: width,
+            newlines: newlines,
         }
     }
 
@@ -32,9 +37,15 @@ impl Progress {
         bar.push(']');
         let pct = current * 100 / self.total;
         print!("\r{}  {} / {} ({}%)", bar, current, self.total, pct);
+        if self.newlines {
+            print!("\n");
+        }
     }
 
     pub fn done(&self) {
-        println!("");
+        if !self.newlines {
+            self.update(self.total);
+            print!("\n");
+        }
     }
 }
