@@ -1,8 +1,8 @@
 use colored::Colorize;
+use clap::Parser;
 use ctr::cipher::{KeyIvInit, StreamCipher};
 use getrandom;
 use serialport::SerialPort;
-use std::env;
 use std::fs;
 use std::io;
 use std::io::Write;
@@ -117,11 +117,11 @@ impl CiphertextWriter {
             .write(&stride.to_le_bytes())
             .expect("Could not send stride length.");
         println!("<< {}", format!("{}", stride).purple());
-        let rram_offset = self.code_size as u32;
+        let offset = self.code_size as u32;
         self.serial
-            .write(&rram_offset.to_le_bytes())
+            .write(&offset.to_le_bytes())
             .expect("Could not send RRAM offset.");
-        println!("<< {}", format!("{}", rram_offset).purple());
+        println!("<< {}", format!("{}", offset).purple());
 
         println!("Reading error code...");
         let err = self.read_u32();
@@ -355,23 +355,21 @@ impl LoadedBinary<'_> {
     }
 }
 
+#[derive(Parser)]
+struct Cli {
+    /// The serial port to use (e.g. /dev/ttyACM0)
+    port: String,
+    /// The file to encrypt
+    file: std::path::PathBuf,
+    /// The compiled ELF expected on the device (not the uf2!)
+    binary: std::path::PathBuf,
+}
+
 fn main() {
-    let args: Vec<String> = env::args().collect();
-    if args.len() != 4 {
-        println!("Usage: erasure PORT FILE BINARY");
-        println!("  PORT is the serial port to use (e.g. /dev/ttyACM0)");
-        println!("  FILE is the data to encrypt");
-        println!("  BINARY is the compiled ELF expected to have been loaded (not the uf2)");
-        process::exit(1);
-    }
+    let args = Cli::parse();
+    println!("Analyzing binary {}", args.binary.to_str().unwrap());
 
-    let port_name = &args[1];
-    let file_name = &args[2];
-    let binary_name = &args[3];
-
-    println!("Analyzing binary {}", binary_name);
-
-    let binary_file_data = std::fs::read(binary_name).expect("Could not open binary file");
+    let binary_file_data = std::fs::read(args.binary).expect("Could not open binary file");
     let bin = LoadedBinary {
         elf: elf::ElfBytes::<_>::minimal_parse(binary_file_data.as_slice())
             .expect("Could not interpret file as ELF"),
@@ -380,15 +378,15 @@ fn main() {
 
     println!(
         "Encrypting file {} and sending on port {}",
-        file_name, port_name
+        args.file.to_str().unwrap(), args.port
     );
 
-    let port = serialport::new(port_name, 1_000_000)
+    let port = serialport::new(args.port, 1_000_000)
         .timeout(time::Duration::from_millis(1000))
         .open()
         .expect("Failed to open port");
 
-    let plaintext = fs::read(file_name.as_str()).expect("Could not open file");
+    let plaintext = fs::read(args.file).expect("Could not open file");
 
     let mut writer = CiphertextWriter::new(port, bin.get_code().as_slice());
     writer.encrypt_and_send(&plaintext);
