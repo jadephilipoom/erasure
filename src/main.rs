@@ -35,7 +35,7 @@ fn write_with_delay(serial: &mut Box<dyn SerialPort>, msg: &[u8]) -> Result<(), 
 
         // Insert a delay between characters. This is an ugly hack to avoid race conditions on
         // the device side.
-        thread::sleep(time::Duration::from_millis(1));
+        // thread::sleep(time::Duration::from_millis(1));
     }
     Ok(())
 }
