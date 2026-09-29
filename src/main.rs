@@ -7,7 +7,6 @@ use std::fs;
 use std::io;
 use std::io::Write;
 use std::process;
-use std::thread;
 use std::time;
 
 mod progress;
@@ -26,18 +25,6 @@ struct CiphertextWriter {
     shifter: ShiftXor<16>,
     code_size: usize,
     repl: bool,
-}
-
-/// Sends bytes to the serial port one at a time, inserting a small delay.
-fn write_with_delay(serial: &mut Box<dyn SerialPort>, msg: &[u8]) -> Result<(), io::Error> {
-    for &c in msg {
-        serial.write(&[c])?;
-
-        // Insert a delay between characters. This is an ugly hack to avoid race conditions on
-        // the device side.
-        // thread::sleep(time::Duration::from_millis(1));
-    }
-    Ok(())
 }
 
 impl CiphertextWriter {
@@ -141,8 +128,7 @@ impl CiphertextWriter {
     /// Attempts to send the command over the serial port in REPL mode.
     fn try_send_cmd(&mut self, cmd: &str) -> Result<(), io::Error> {
         println!("\r<< {}", cmd.purple());
-        write_with_delay(&mut self.serial, cmd.as_bytes());
-        write_with_delay(&mut self.serial, b"\n\r");
+        write!(self.serial, "{}\n\r", cmd)?;
 
         // Expect the command itself to get echoed back. This should always happen pretty much
         // immediately.
@@ -168,11 +154,13 @@ impl CiphertextWriter {
             // Binary mode: send stride length and offset to initiate handshake.
             println!("Sending stride length and offset...");
             let stride = Self::STREAM_WRITE_BYTES as u32;
-            write_with_delay(&mut self.serial, &stride.to_le_bytes())
+            self.serial
+                .write(&stride.to_le_bytes())
                 .expect("Could not send stride length.");
             println!("<< {}", format!("{}", stride).purple());
             let offset = self.code_size as u32;
-            write_with_delay(&mut self.serial, &offset.to_le_bytes())
+            self.serial
+                .write(&offset.to_le_bytes())
                 .expect("Could not send RRAM offset.");
             println!("<< {}", format!("{}", offset).purple());
 
@@ -201,7 +189,7 @@ impl CiphertextWriter {
         if self.repl {
             self.send_cmd(format!("erase write-bin {}", Self::STREAM_WRITE_BYTES).as_str());
         }
-        let result = write_with_delay(&mut self.serial, data);
+        let result = self.serial.write_all(data);
         self.unwrap_serial(result, "writing ciphertext");
         self.bytes_written += data.len();
 
@@ -277,7 +265,7 @@ impl CiphertextWriter {
         while self.bytes_written < target_bytelen {
             let data = &zero_buf[..Self::KEY_BYTES];
             self.shifter.absorb(data);
-            let result = write_with_delay(&mut self.serial, data);
+            let result = self.serial.write_all(data);
             self.unwrap_serial(result, "writing final padding bytes");
             self.bytes_written += data.len();
         }
@@ -313,10 +301,10 @@ impl CiphertextWriter {
             device_key.copy_from_slice(&key_bytes);
         } else {
             // Binary mode; just write the seed and key and then read the response
-            let result = write_with_delay(&mut self.serial, seed);
+            let result = self.serial.write_all(seed);
             self.unwrap_serial(result, "writing seed");
             let key_block = self.shifter.key();
-            let result = write_with_delay(&mut self.serial, key_block);
+            let result = self.serial.write_all(key_block);
             self.unwrap_serial(result, "writing key_block");
             let start = time::Instant::now();
             let result = self.serial.read_exact(&mut device_key);
