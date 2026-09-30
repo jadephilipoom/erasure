@@ -455,6 +455,7 @@ fn main() {
 
     let port = serialport::new(args.port, 1_000_000)
         .timeout(time::Duration::from_millis(2000))
+        .flow_control(serialport::FlowControl::Software)
         .open()
         .expect("Failed to open port");
 
