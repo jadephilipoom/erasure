@@ -30,7 +30,7 @@ struct CiphertextWriter {
 impl CiphertextWriter {
     /// Size of the blocks of ciphertext we will stream across the serial interface. Should be a
     /// multiple of the ShiftXor block size.
-    const STREAM_WRITE_BYTES: usize = 1024;
+    const STREAM_WRITE_BYTES: usize = 32;
 
     /// Determines the ShiftXor block size.
     const KEY_BYTES: usize = 16;
@@ -81,8 +81,10 @@ impl CiphertextWriter {
                     // A timeout might mean a panic; try to read the panic message off of the serial
                     // interface before exit.
                     self.read_and_print_all().ok();
-                    println!("{}", format!("\nTimeout {}, try rebooting?", descr).red());
-                    process::exit(1);
+                    // TODO: debug
+                    panic!("Timeout!");
+                    // println!("{}", format!("\nTimeout {}, try rebooting?", descr).red());
+                    // process::exit(1);
                 } else {
                     panic!("Error {}: {}", descr, e);
                 }
@@ -198,6 +200,29 @@ impl CiphertextWriter {
             let expected_ack = format!("wrote {} bytes\r\n", Self::STREAM_WRITE_BYTES);
             self.expect_response(&expected_ack).expect("Error reading ack");
         } else {
+            let rxcode = self.read_u32();
+            let rxlen = self.read_u32();
+            let recvcode = self.read_u32();
+            let recv = self.read_u32();
+            let nextackcode = self.read_u32();
+            let nextack = self.read_u32();
+            let ackcode = self.read_u32();
+            dbg!(rxlen);
+            dbg!(recv);
+            dbg!(nextack);
+            dbg!(self.bytes_written);
+            if rxcode != 0xaa {
+                panic!("bad rxcode");
+            }
+            if recvcode != 0xbb {
+                panic!("bad recvcode: {}", recvcode);
+            }
+            if nextackcode != 0xcc {
+                panic!("bad nextackcode: {}", nextackcode);
+            }
+            if ackcode != 0xdd {
+                panic!("bad ackcode: {}", ackcode);
+            }
             let reply = self.read_u32();
             if reply as usize != self.bytes_written {
                 panic!(
