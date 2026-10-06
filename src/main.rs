@@ -30,7 +30,7 @@ struct CiphertextWriter {
 impl CiphertextWriter {
     /// Size of the blocks of ciphertext we will stream across the serial interface. Should be a
     /// multiple of the ShiftXor block size.
-    const STREAM_WRITE_BYTES: usize = 32;
+    const STREAM_WRITE_BYTES: usize = 1024;
 
     /// Determines the ShiftXor block size.
     const KEY_BYTES: usize = 16;
@@ -81,10 +81,8 @@ impl CiphertextWriter {
                     // A timeout might mean a panic; try to read the panic message off of the serial
                     // interface before exit.
                     self.read_and_print_all().ok();
-                    // TODO: debug
-                    panic!("Timeout!");
-                    // println!("{}", format!("\nTimeout {}, try rebooting?", descr).red());
-                    // process::exit(1);
+                    println!("{}", format!("\nTimeout {}, try rebooting?", descr).red());
+                    process::exit(1);
                 } else {
                     panic!("Error {}: {}", descr, e);
                 }
@@ -93,10 +91,13 @@ impl CiphertextWriter {
     }
 
     fn read_u32(&mut self) -> u32 {
-        let mut reply = [0u8; 4];
+        let mut reply = [0u8; 8];
         let result = self.serial.read_exact(&mut reply);
         self.unwrap_serial(result, "reading u32 value");
-        u32::from_le_bytes(reply)
+        let mut bs = [0u8; 4];
+        hex::decode_to_slice(reply, &mut bs)
+            .expect("Could not decode hexadecimal u32");
+        u32::from_le_bytes(bs)
     }
 
     fn read_and_print_all(&mut self) -> Result<String, io::Error> {
@@ -200,29 +201,6 @@ impl CiphertextWriter {
             let expected_ack = format!("wrote {} bytes\r\n", Self::STREAM_WRITE_BYTES);
             self.expect_response(&expected_ack).expect("Error reading ack");
         } else {
-            let rxcode = self.read_u32();
-            let rxlen = self.read_u32();
-            let recvcode = self.read_u32();
-            let recv = self.read_u32();
-            let nextackcode = self.read_u32();
-            let nextack = self.read_u32();
-            let ackcode = self.read_u32();
-            dbg!(rxlen);
-            dbg!(recv);
-            dbg!(nextack);
-            dbg!(self.bytes_written);
-            if rxcode != 0xaa {
-                panic!("bad rxcode");
-            }
-            if recvcode != 0xbb {
-                panic!("bad recvcode: {}", recvcode);
-            }
-            if nextackcode != 0xcc {
-                panic!("bad nextackcode: {}", nextackcode);
-            }
-            if ackcode != 0xdd {
-                panic!("bad ackcode: {}", ackcode);
-            }
             let reply = self.read_u32();
             if reply as usize != self.bytes_written {
                 panic!(
@@ -309,7 +287,7 @@ impl CiphertextWriter {
 
         // Send the seed and the key block across the serial interface.
         let seed = self.shifter.seed();
-        let mut device_key = [0u8; Self::KEY_BYTES];
+        let mut key_hex = [0u8; Self::KEY_BYTES * 2];
         let elapsed: time::Duration;
         if self.repl {
             // REPL mode: send the erase key command
@@ -317,13 +295,10 @@ impl CiphertextWriter {
             let key_block = self.shifter.key();
             self.try_send_cmd(format!("erase key {} {}", hex::encode(seed), hex::encode(key_block)).as_str())
                 .expect("Error sending key command");
-            let mut key_hex = [0u8; Self::KEY_BYTES * 2];
             let result = self.serial.read_exact(&mut key_hex);
             elapsed = start.elapsed();
             self.unwrap_serial(result, "reading key");
-            let key_bytes = hex::decode(key_hex).expect("Could not interpret key as hex");
             self.expect_response("\r\n").expect("Error reading trailing whitespace");
-            device_key.copy_from_slice(&key_bytes);
         } else {
             // Binary mode; just write the seed and key and then read the response
             let result = self.serial.write_all(seed);
@@ -332,12 +307,15 @@ impl CiphertextWriter {
             let result = self.serial.write_all(key_block);
             self.unwrap_serial(result, "writing key_block");
             let start = time::Instant::now();
-            let result = self.serial.read_exact(&mut device_key);
+            let result = self.serial.read_exact(&mut key_hex);
             elapsed = start.elapsed();
             self.unwrap_serial(result, "reading key");
-            println!("\r>> {}", hex::encode(device_key).blue());
         }
         self.serial.set_timeout(old_timeout).unwrap();
+
+        let device_key = hex::decode(key_hex)
+            .expect("Could not interpret key as hex");
+        println!("\r>> {}", hex::encode(&device_key).blue());
 
 
         if device_key == self.key {
