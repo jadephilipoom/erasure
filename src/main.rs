@@ -263,6 +263,11 @@ impl CiphertextWriter {
             progress.update(self.bytes_written);
         }
 
+        // In repl mode, announce the binary write for remaining space beforehand.
+        if self.repl {
+            self.send_cmd(format!("erase write-bin {}", target_bytelen - self.bytes_written).as_str());
+        }
+
         // Final write might be smaller than the usual stream block. Relies on the assumption that
         // the target length is a multiple of the key byte size.
         while self.bytes_written < target_bytelen {
@@ -271,6 +276,12 @@ impl CiphertextWriter {
             let result = self.serial.write_all(data);
             self.unwrap_serial(result, "writing final padding bytes");
             self.bytes_written += data.len();
+        }
+
+        // In repl mode, wait for the ack.
+        if self.repl {
+            let expected_ack = format!("wrote {} bytes\r\n", Self::STREAM_WRITE_BYTES);
+            self.expect_response(&expected_ack).expect("Error reading ack");
         }
 
         progress.done();
