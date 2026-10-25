@@ -280,10 +280,20 @@ impl CiphertextWriter {
             self.bytes_written += data.len();
         }
 
-        // In repl mode, wait for the ack.
-        if self.repl && final_bytes != 0 {
-            let expected_ack = format!("wrote {} bytes\r\n", final_bytes);
-            self.expect_response(&expected_ack).expect("Error reading ack");
+        // If there were final bytes, wait for the ack.
+        if final_bytes != 0 {
+            if self.repl {
+                let expected_ack = format!("wrote {} bytes\r\n", final_bytes);
+                self.expect_response(&expected_ack).expect("Error reading ack");
+            } else {
+                let reply = self.read_u32();
+                if reply as usize != self.bytes_written {
+                    panic!(
+                        "Device write count ({}) does not match host count ({})!",
+                        reply, self.bytes_written
+                    );
+                }
+            }
         }
 
         progress.done();
