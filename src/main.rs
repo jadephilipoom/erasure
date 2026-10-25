@@ -280,7 +280,7 @@ impl CiphertextWriter {
 
         // In repl mode, wait for the ack.
         if self.repl {
-            let expected_ack = format!("wrote {} bytes\r\n", Self::STREAM_WRITE_BYTES);
+            let expected_ack = format!("wrote {} bytes\r\n", self.bytes_written % Self::STREAM_WRITE_BYTES);
             self.expect_response(&expected_ack).expect("Error reading ack");
         }
 
