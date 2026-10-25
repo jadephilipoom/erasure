@@ -263,9 +263,11 @@ impl CiphertextWriter {
             progress.update(self.bytes_written);
         }
 
+        let final_bytes = target_bytelen - self.bytes_written;
+
         // In repl mode, announce the binary write for remaining space beforehand.
-        if self.repl {
-            self.send_cmd(format!("erase write-bin {}", target_bytelen - self.bytes_written).as_str());
+        if self.repl && final_bytes != 0 {
+            self.send_cmd(format!("erase write-bin {}", final_bytes).as_str());
         }
 
         // Final write might be smaller than the usual stream block. Relies on the assumption that
@@ -279,8 +281,8 @@ impl CiphertextWriter {
         }
 
         // In repl mode, wait for the ack.
-        if self.repl {
-            let expected_ack = format!("wrote {} bytes\r\n", self.bytes_written % Self::STREAM_WRITE_BYTES);
+        if self.repl && final_bytes != 0 {
+            let expected_ack = format!("wrote {} bytes\r\n", final_bytes);
             self.expect_response(&expected_ack).expect("Error reading ack");
         }
 
